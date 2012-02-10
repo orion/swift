@@ -21,6 +21,7 @@ import time
 import shutil
 import uuid
 import errno
+import pystatsd
 
 from eventlet import GreenPool, sleep, Timeout
 from eventlet.green import subprocess
@@ -119,6 +120,13 @@ class Replicator(Daemon):
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.reclaim_age = float(conf.get('reclaim_age', 86400 * 7))
         self._zero_stats()
+        statsd_host = conf.get('statsd_host', None)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          '%s-replicator' % (self.server_type,))
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def _zero_stats(self):
         """Zero out the stats."""
@@ -212,6 +220,7 @@ class Replicator(Daemon):
         :returns: boolean indicating completion and success
         """
         self.stats['diff'] += 1
+        self.statsd.increment('diff')
         self.logger.debug(_('Syncing chunks with %s'), http.host)
         sync_table = broker.get_syncs()
         objects = broker.get_items_since(point, self.per_diff)
@@ -248,9 +257,11 @@ class Replicator(Daemon):
         """
         if max(rinfo['point'], local_sync) >= info['max_row']:
             self.stats['no_change'] += 1
+            self.statsd.increment('no_change')
             return True
         if rinfo['hash'] == info['hash']:
             self.stats['hashmatch'] += 1
+            self.statsd.increment('hashmatch')
             broker.merge_syncs([{'remote_id': rinfo['id'],
                 'sync_point': rinfo['point']}], incoming=False)
             return True
@@ -295,6 +306,7 @@ class Replicator(Daemon):
             return False
         elif response.status == HTTPNotFound.code:  # completely missing, rsync
             self.stats['rsync'] += 1
+            self.statsd.increment('rsync')
             return self._rsync_db(broker, node, http, info['id'])
         elif response.status == HTTPInsufficientStorage.code:
             raise DriveNotMounted()
@@ -307,6 +319,7 @@ class Replicator(Daemon):
             # more than 50%, rsync then do a remote merge.
             if rinfo['max_row'] / float(info['max_row']) < 0.5:
                 self.stats['remote_merge'] += 1
+                self.statsd.increment('remote_merge')
                 return self._rsync_db(broker, node, http, info['id'],
                         replicate_method='rsync_then_merge',
                         replicate_timeout=(info['count'] / 2000))
@@ -325,6 +338,7 @@ class Replicator(Daemon):
         """
         self.logger.debug(_('Replicating db %s'), object_file)
         self.stats['attempted'] += 1
+        self.statsd.increment('attempted')
         try:
             broker = self.brokerclass(object_file, pending_timeout=30)
             broker.reclaim(time.time() - self.reclaim_age,
@@ -337,6 +351,7 @@ class Replicator(Daemon):
             else:
                 self.logger.exception(_('ERROR reading db %s'), object_file)
             self.stats['failure'] += 1
+            self.statsd.increment('failure')
             return
         # The db is considered deleted if the delete_timestamp value is greater
         # than the put_timestamp, and there are no objects.
@@ -356,6 +371,7 @@ class Replicator(Daemon):
             with lock_parent_directory(object_file):
                 shutil.rmtree(os.path.dirname(object_file), True)
                 self.stats['remove'] += 1
+                self.statsd.increment('remove')
             return
         responses = []
         nodes = self.ring.get_part_nodes(int(partition))
@@ -373,6 +389,7 @@ class Replicator(Daemon):
                 self.logger.exception(_('ERROR syncing %(file)s with node'
                         ' %(node)s'), {'file': object_file, 'node': node})
             self.stats['success' if success else 'failure'] += 1
+            self.statsd.increment('success' if success else 'failure')
             responses.append(success)
         if not shouldbehere and all(responses):
             # If the db shouldn't be on this node and has been successfully
@@ -380,6 +397,7 @@ class Replicator(Daemon):
             with lock_parent_directory(object_file):
                 shutil.rmtree(os.path.dirname(object_file), True)
                 self.stats['remove'] += 1
+                self.statsd.increment('remove')
 
     def roundrobin_datadirs(self, datadirs):
         """

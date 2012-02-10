@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import time
+import pystatsd
 from random import random, shuffle
 from tempfile import mkstemp
 
@@ -56,6 +57,13 @@ class ContainerUpdater(Daemon):
         self.account_suppression_time = \
             float(conf.get('account_suppression_time', 60))
         self.new_account_suppressions = None
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'container-updater')
+        else:
+            self.statsd = pystatsd.ClientNop()
+
 
     def get_account_ring(self):
         """Get the account ring.  Load it if it hasn't been yet."""
@@ -201,6 +209,7 @@ class ContainerUpdater(Daemon):
             return
         if self.account_suppressions.get(info['account'], 0) > time.time():
             return
+        start_time = time.time()
         if info['put_timestamp'] > info['reported_put_timestamp'] or \
                 info['delete_timestamp'] > info['reported_delete_timestamp'] \
                 or info['object_count'] != info['reported_object_count'] or \
@@ -219,6 +228,7 @@ class ContainerUpdater(Daemon):
                 else:
                     failures += 1
             if successes > failures:
+                self.statsd.increment('successes')
                 self.successes += 1
                 self.logger.debug(
                     _('Update report sent for %(container)s %(dbfile)s'),
@@ -227,6 +237,7 @@ class ContainerUpdater(Daemon):
                                 info['delete_timestamp'], info['object_count'],
                                 info['bytes_used'])
             else:
+                self.statsd.increment('failures')
                 self.failures += 1
                 self.logger.debug(
                     _('Update report failed for %(container)s %(dbfile)s'),
@@ -237,7 +248,9 @@ class ContainerUpdater(Daemon):
                     print >>self.new_account_suppressions, \
                         info['account'], until
         else:
+            self.statsd.increment('no_changes')
             self.no_changes += 1
+        self.statsd.timing_since('timing', start_time)
 
     def container_report(self, node, part, container, put_timestamp,
                          delete_timestamp, count, bytes):
