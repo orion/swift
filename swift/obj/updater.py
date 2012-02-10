@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 import time
+import pystatsd
 from random import random
 
 from eventlet import patcher, Timeout
@@ -49,6 +50,12 @@ class ObjectUpdater(Daemon):
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.successes = 0
         self.failures = 0
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'object-updater')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def get_container_ring(self):
         """Get the container ring.  Load it, if it hasn't been yet."""
@@ -70,6 +77,7 @@ class ObjectUpdater(Daemon):
             for device in os.listdir(self.devices):
                 if self.mount_check and not \
                         os.path.ismount(os.path.join(self.devices, device)):
+                    self.pystatsd.increment('errors')
                     self.logger.warn(
                         _('Skipping %s as it is not mounted'), device)
                     continue
@@ -109,6 +117,7 @@ class ObjectUpdater(Daemon):
         for device in os.listdir(self.devices):
             if self.mount_check and \
                     not os.path.ismount(os.path.join(self.devices, device)):
+                self.pystatsd.increment('errors')
                 self.logger.warn(
                     _('Skipping %s as it is not mounted'), device)
                 continue
@@ -125,6 +134,7 @@ class ObjectUpdater(Daemon):
 
         :param device: path to device
         """
+        start_time = time.time()
         async_pending = os.path.join(device, ASYNCDIR)
         if not os.path.isdir(async_pending):
             return
@@ -140,6 +150,7 @@ class ObjectUpdater(Daemon):
                 try:
                     obj_hash, timestamp = update.split('-')
                 except ValueError:
+                    self.pystatsd.increment('errors')
                     self.logger.error(
                         _('ERROR async pending file with unexpected name %s')
                         % (update_path))
@@ -154,6 +165,7 @@ class ObjectUpdater(Daemon):
                 os.rmdir(prefix_path)
             except OSError:
                 pass
+        self.statsd.timing_since('timing', start_time)
 
     def process_object_update(self, update_path, device):
         """
@@ -167,6 +179,7 @@ class ObjectUpdater(Daemon):
         except Exception:
             self.logger.exception(
                 _('ERROR Pickle problem, quarantining %s'), update_path)
+            self.pystatsd.increment('quarantine')
             renamer(update_path, os.path.join(device,
                 'quarantined', 'objects', os.path.basename(update_path)))
             return
@@ -186,11 +199,13 @@ class ObjectUpdater(Daemon):
                     successes.append(node['id'])
         if success:
             self.successes += 1
+            self.pystatsd.increment('successes')
             self.logger.debug(_('Update sent for %(obj)s %(path)s'),
                 {'obj': obj, 'path': update_path})
             os.unlink(update_path)
         else:
             self.failures += 1
+            self.pystatsd.increment('failures')
             self.logger.debug(_('Update failed for %(obj)s %(path)s'),
                 {'obj': obj, 'path': update_path})
             update['successes'] = successes

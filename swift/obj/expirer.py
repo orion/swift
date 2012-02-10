@@ -17,6 +17,7 @@ from random import random
 from sys import exc_info
 from time import time
 from urllib import quote
+import pystatsd
 
 from eventlet import sleep, Timeout
 from paste.deploy import loadapp
@@ -52,6 +53,12 @@ class ObjectExpirer(Daemon):
         self.report_interval = int(conf.get('report_interval') or 300)
         self.report_first_time = self.report_last_time = time()
         self.report_objects = 0
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'object-expirer')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def report(self, final=False):
         """
@@ -95,14 +102,18 @@ class ObjectExpirer(Daemon):
                     timestamp = int(timestamp)
                     if timestamp > int(time()):
                         break
+                    start_time = time.time()
                     try:
                         self.delete_actual_object(actual_obj, timestamp)
                         self.delete_object(container, obj)
                         self.report_objects += 1
+                        self.statsd.increment('objects')
                     except (Exception, Timeout), err:
+                        self.statsd.increment('errors')
                         self.logger.exception(
                             _('Exception while deleting object %s %s %s') %
                             (container, obj, str(err)))
+                    self.statsd.timing_since('timing', start_time)
                     self.report()
                 try:
                     self.delete_container(container)
