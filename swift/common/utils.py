@@ -21,6 +21,7 @@ import os
 import pwd
 import sys
 import time
+import functools
 from hashlib import md5
 from random import shuffle
 from urllib import quote
@@ -38,6 +39,10 @@ except ImportError:
 import cPickle as pickle
 import glob
 from urlparse import urlparse as stdlib_urlparse, ParseResult
+try:
+    import pystatsd
+except ImportError:
+    pass
 
 import eventlet
 from eventlet import GreenPool, sleep
@@ -377,6 +382,51 @@ class LogAdapter(logging.LoggerAdapter, object):
             call = self._exception
         call('%s: %s' % (msg, emsg), *args, **kwargs)
 
+    def set_statsd_prefix(self, prefix):
+        """
+        The StatsD client prefix defaults to the "name" of the logger.  This
+        method may override that default with a specific value.  Currently used
+        in the proxy-server to differentiate the Account, Container, and Object
+        controllers.
+        """
+        if self.logger.statsd_client:
+            self.logger.statsd_client.prefix = prefix
+
+    def statsd_delegate(statsd_func_name):
+        """
+        Factory which creates methods which delegate to methods on
+        self.logger.statsd_client (an instance of pystatsd.Client).  The
+        created methods conditionally delegate to a method whose name is given
+        in 'statsd_func_name'.  The created delegate methods are a no-op when
+        either the pystatsd module is not found or StatsD logging is not
+        configured.  The created delegate methods handle the defaulting of
+        sample_rate (to either the default specified in the config with
+        'log_statsd_default_sample_rate' or the value passed into delegate
+        function).
+
+        :param statsd_func_name: the name of a method on pystatsd.Client
+        """
+
+        if 'pystatsd' in sys.modules:
+            func = getattr(pystatsd.Client, statsd_func_name)
+            if func:
+                @functools.wraps(func)
+                def wrapped(self, *a, **kw):
+                    if getattr(self.logger, 'statsd_client'):
+                        if 'sample_rate' not in kw:
+                            kw['sample_rate'] = \
+                                self.logger.statsd_default_sample_rate
+                        return func(self.logger.statsd_client, *a, **kw)
+                return wrapped
+            print "Unable to getattr %r from %r" % (statsd_func_name,
+                                                    pystatsd.Client)
+        return lambda *a, **kw: ''
+
+    increment = statsd_delegate('increment')
+    timing = statsd_delegate('timing')
+    timing_since = statsd_delegate('timing_since')
+    update_stats = statsd_delegate('update_stats')
+
 
 class SwiftLogFormatter(logging.Formatter):
     """
@@ -405,6 +455,9 @@ def get_logger(conf, name=None, log_to_console=False, log_route=None,
         log_facility = LOG_LOCAL0
         log_level = INFO
         log_name = swift
+        log_statsd_host = (disabled)
+        log_statsd_port = 8125
+        log_statsd_default_sample_rate = 1
 
     :param conf: Configuration dict to read settings from
     :param name: Name of the logger
@@ -454,6 +507,18 @@ def get_logger(conf, name=None, log_to_console=False, log_route=None,
     # set the level for the logger
     logger.setLevel(
         getattr(logging, conf.get('log_level', 'INFO').upper(), logging.INFO))
+
+    # Setup logger with a StatsD client if so configured
+    statsd_host = conf.get('log_statsd_host')
+    if statsd_host and 'pystatsd' in sys.modules:
+        statsd_port = int(conf.get('log_statsd_port', 8125))
+        statsd_client = pystatsd.Client(statsd_host, statsd_port, name)
+        logger.statsd_client = statsd_client
+        logger.statsd_default_sample_rate = conf.get(
+            'log_statsd_default_sample_rate', 1)
+    else:
+        logger.statsd_client = None
+
     adapted_logger = LogAdapter(logger, name)
     return adapted_logger
 
