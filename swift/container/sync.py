@@ -17,6 +17,7 @@ import os
 from time import ctime, time
 from random import random, shuffle
 from struct import unpack_from
+import pystatsd
 
 from eventlet import sleep, Timeout
 
@@ -179,6 +180,12 @@ class ContainerSync(Daemon):
             Ring(os.path.join(swift_dir, 'object.ring.gz'))
         self._myips = whataremyips()
         self._myport = int(conf.get('bind_port', 6001))
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'container-sync')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def run_forever(self):
         """
@@ -271,6 +278,7 @@ class ContainerSync(Daemon):
                         sync_key = value
                 if not sync_to or not sync_key:
                     self.container_skips += 1
+                    self.statsd.increment('skips')
                     return
                 sync_to = sync_to.rstrip('/')
                 err = validate_sync_to(sync_to, self.allowed_sync_hosts)
@@ -280,6 +288,7 @@ class ContainerSync(Daemon):
                         {'db_file': broker.db_file,
                          'validate_sync_to_err': err})
                     self.container_failures += 1
+                    self.statsd.increment('failures')
                     return
                 stop_at = time() + self.container_time
                 while time() < stop_at and sync_point2 < sync_point1:
@@ -322,8 +331,10 @@ class ContainerSync(Daemon):
                     sync_point1 = row['ROWID']
                     broker.set_x_container_sync_points(sync_point1, None)
                 self.container_syncs += 1
+                self.statsd.increment('syncs')
         except (Exception, Timeout), err:
             self.container_failures += 1
+            self.statsd.increment('failures')
             self.logger.exception(_('ERROR Syncing %s'), (broker.db_file))
 
     def container_sync_row(self, row, sync_to, sync_key, broker, info):
@@ -351,6 +362,7 @@ class ContainerSync(Daemon):
                     if err.http_status != 404:
                         raise
                 self.container_deletes += 1
+                self.statsd.increment('deletes')
             else:
                 part, nodes = self.object_ring.get_nodes(
                     info['account'], info['container'],
@@ -396,6 +408,7 @@ class ContainerSync(Daemon):
                 put_object(sync_to, name=row['name'], headers=headers,
                     contents=_Iter2FileLikeObject(body), proxy=self.proxy)
                 self.container_puts += 1
+                self.statsd.increment('puts')
         except ClientException, err:
             if err.http_status == 401:
                 self.logger.info(_('Unauth %(sync_from)r '
@@ -414,11 +427,13 @@ class ContainerSync(Daemon):
                     _('ERROR Syncing %(db_file)s %(row)s'),
                     {'db_file': broker.db_file, 'row': row})
             self.container_failures += 1
+            self.statsd.increment('failures')
             return False
         except (Exception, Timeout), err:
             self.logger.exception(
                 _('ERROR Syncing %(db_file)s %(row)s'),
                 {'db_file': broker.db_file, 'row': row})
             self.container_failures += 1
+            self.statsd.increment('failures')
             return False
         return True

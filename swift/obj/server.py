@@ -21,6 +21,7 @@ import errno
 import os
 import time
 import traceback
+import pystatsd
 from datetime import datetime
 from hashlib import md5
 from tempfile import mkstemp
@@ -377,6 +378,13 @@ class ObjectController(object):
             'expiring_objects'
         self.expiring_objects_container_divisor = \
             int(conf.get('expiring_objects_container_divisor') or 86400)
+        statsd_host = conf.get('statsd_host', None)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'object-server')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def async_update(self, op, account, container, obj, host, partition,
                      contdevice, headers_out, objdevice):
@@ -418,6 +426,7 @@ class ObjectController(object):
                     {'ip': ip, 'port': port, 'dev': contdevice})
         async_dir = os.path.join(self.devices, objdevice, ASYNCDIR)
         ohash = hash_path(account, container, obj)
+        self.statsd.increment('async_pending')
         write_pickle(
             {'op': op, 'account': account, 'container': container,
                 'obj': obj, 'headers': headers_out},
@@ -477,27 +486,34 @@ class ObjectController(object):
 
     def POST(self, request):
         """Handle HTTP POST requests for the Swift Object Server."""
+        self.statsd.increment('POST.count')
+        start_time = time.time()
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
+            self.statsd.increment('POST.error')
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
         if 'x-timestamp' not in request.headers or \
                     not check_float(request.headers['x-timestamp']):
+            self.statsd.increment('POST.error')
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
         new_delete_at = int(request.headers.get('X-Delete-At') or 0)
         if new_delete_at and new_delete_at < time.time():
+            self.statsd.increment('POST.error')
             return HTTPBadRequest(body='X-Delete-At in past', request=request,
                                   content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
+            self.statsd.increment('POST.error')
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
 
         if 'X-Delete-At' in file.metadata and \
                 int(file.metadata['X-Delete-At']) <= time.time():
+            self.statsd.timing_since('POST.timing', start_time)
             return HTTPNotFound(request=request)
         if file.is_deleted():
             response_class = HTTPNotFound
@@ -507,6 +523,7 @@ class ObjectController(object):
             file_size = file.get_data_file_size()
         except (DiskFileError, DiskFileNotExist):
             file.quarantine()
+            self.statsd.increment('POST.quarantine')
             return HTTPNotFound(request=request)
         metadata = {'X-Timestamp': request.headers['x-timestamp']}
         metadata.update(val for val in request.headers.iteritems()
@@ -525,27 +542,35 @@ class ObjectController(object):
                                       container, obj, request.headers, device)
         with file.mkstemp() as (fd, tmppath):
             file.put(fd, tmppath, metadata, extension='.meta')
+        self.statsd.timing_since('POST.timing', start_time)
         return response_class(request=request)
 
     def PUT(self, request):
         """Handle HTTP PUT requests for the Swift Object Server."""
+        self.statsd.increment('PUT.count')
+        start_time = time.time()
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
+            self.statsd.increment('PUT.error')
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
+            self.statsd.increment('PUT.error')
             return Response(status='507 %s is not mounted' % device)
         if 'x-timestamp' not in request.headers or \
                     not check_float(request.headers['x-timestamp']):
+            self.statsd.increment('PUT.error')
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
         error_response = check_object_creation(request, obj)
         if error_response:
+            self.statsd.increment('PUT.error')
             return error_response
         new_delete_at = int(request.headers.get('X-Delete-At') or 0)
         if new_delete_at and new_delete_at < time.time():
+            self.statsd.increment('PUT.error')
             return HTTPBadRequest(body='X-Delete-At in past', request=request,
                                   content_type='text/plain')
         file = DiskFile(self.devices, device, partition, account, container,
@@ -562,6 +587,7 @@ class ObjectController(object):
             for chunk in iter(lambda: reader(self.network_chunk_size), ''):
                 upload_size += len(chunk)
                 if time.time() > upload_expiration:
+                    self.statsd.increment('PUT.timeout')
                     return HTTPRequestTimeout(request=request)
                 etag.update(chunk)
                 while chunk:
@@ -614,17 +640,22 @@ class ObjectController(object):
                  'x-trans-id': request.headers.get('x-trans-id', '-')},
                 device)
         resp = HTTPCreated(request=request, etag=etag)
+        self.statsd.timing_since('PUT.timing', start_time)
         return resp
 
     def GET(self, request):
         """Handle HTTP GET requests for the Swift Object Server."""
+        self.statsd.increment('GET.count')
+        start_time = time.time()
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
+            self.statsd.increment('GET.error')
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
+            self.statsd.increment('GET.error')
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, keep_data_fp=True,
@@ -632,13 +663,16 @@ class ObjectController(object):
         if file.is_deleted() or ('X-Delete-At' in file.metadata and
                 int(file.metadata['X-Delete-At']) <= time.time()):
             if request.headers.get('if-match') == '*':
+                self.statsd.timing_since('GET.timing', start_time)
                 return HTTPPreconditionFailed(request=request)
             else:
+                self.statsd.timing_since('GET.timing', start_time)
                 return HTTPNotFound(request=request)
         try:
             file_size = file.get_data_file_size()
         except (DiskFileError, DiskFileNotExist):
             file.quarantine()
+            self.statsd.increment('GET.quarantine')
             return HTTPNotFound(request=request)
         if request.headers.get('if-match') not in (None, '*') and \
                 file.metadata['ETag'] not in request.if_match:
@@ -688,29 +722,35 @@ class ObjectController(object):
         if 'Content-Encoding' in file.metadata:
             response.content_encoding = file.metadata['Content-Encoding']
         response.headers['X-Timestamp'] = file.metadata['X-Timestamp']
+        self.statsd.timing_since('GET.timing', start_time)
         return request.get_response(response)
 
     def HEAD(self, request):
         """Handle HTTP HEAD requests for the Swift Object Server."""
+        start_time = time.time()
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
+            self.statsd.increment('HEAD.error')
             resp = HTTPBadRequest(request=request)
             resp.content_type = 'text/plain'
             resp.body = str(err)
             return resp
         if self.mount_check and not check_mount(self.devices, device):
+            self.statsd.increment('HEAD.error')
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
         if file.is_deleted() or ('X-Delete-At' in file.metadata and
                 int(file.metadata['X-Delete-At']) <= time.time()):
+            self.statsd.timing_since('HEAD.timing', start_time)
             return HTTPNotFound(request=request)
         try:
             file_size = file.get_data_file_size()
         except (DiskFileError, DiskFileNotExist):
             file.quarantine()
+            self.statsd.increment('HEAD.quarantine')
             return HTTPNotFound(request=request)
         response = Response(request=request, conditional_response=True)
         response.headers['Content-Type'] = file.metadata.get('Content-Type',
@@ -727,21 +767,26 @@ class ObjectController(object):
         if 'Content-Encoding' in file.metadata:
             response.content_encoding = file.metadata['Content-Encoding']
         response.headers['X-Timestamp'] = file.metadata['X-Timestamp']
+        self.statsd.timing_since('HEAD.timing', start_time)
         return response
 
     def DELETE(self, request):
         """Handle HTTP DELETE requests for the Swift Object Server."""
+        start_time = time.time()
         try:
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, e:
+            self.statsd.increment('HEAD.error')
             return HTTPBadRequest(body=str(e), request=request,
                         content_type='text/plain')
         if 'x-timestamp' not in request.headers or \
                     not check_float(request.headers['x-timestamp']):
+            self.statsd.increment('HEAD.error')
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
+            self.statsd.increment('HEAD.error')
             return Response(status='507 %s is not mounted' % device)
         response_class = HTTPNoContent
         file = DiskFile(self.devices, device, partition, account, container,
@@ -771,6 +816,7 @@ class ObjectController(object):
                 'x-trans-id': request.headers.get('x-trans-id', '-')},
                 device)
         resp = response_class(request=request)
+        self.statsd.timing_since('DELETE.timing', start_time)
         return resp
 
     def REPLICATE(self, request):
@@ -778,13 +824,16 @@ class ObjectController(object):
         Handle REPLICATE requests for the Swift Object Server.  This is used
         by the object replicator to get hashes for directories.
         """
+        start_time = time.time()
         try:
             device, partition, suffix = split_path(
                 unquote(request.path), 2, 3, True)
         except ValueError, e:
+            self.statsd.increment('REPLICATE.error')
             return HTTPBadRequest(body=str(e), request=request,
                                   content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
+            self.statsd.increment('REPLICATE.error')
             return Response(status='507 %s is not mounted' % device)
         path = os.path.join(self.devices, device, DATADIR, partition)
         if not os.path.exists(path):
@@ -794,7 +843,9 @@ class ObjectController(object):
                                       recalculate=suffixes)
         # See tpooled_get_hashes "Hack".
         if isinstance(hashes, BaseException):
+            self.statsd.increment('REPLICATE.error')
             raise hashes
+        self.statsd.timing_since('REPLICATE.timing', start_time)
         return Response(body=pickle.dumps(hashes))
 
     def __call__(self, env, start_response):

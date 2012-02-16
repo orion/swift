@@ -17,6 +17,7 @@ import os
 import time
 import uuid
 import errno
+import pystatsd
 from hashlib import md5
 from random import random
 
@@ -59,6 +60,13 @@ class AuditorWorker(object):
         self.passes = 0
         self.quarantines = 0
         self.errors = 0
+        statsd_host = conf.get('statsd_host', None)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'object-auditor')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def audit_all_objects(self, mode='once'):
         self.logger.info(_('Begin object audit "%s" mode (%s)' %
@@ -105,6 +113,8 @@ class AuditorWorker(object):
                 self.errors = 0
                 self.bytes_processed = 0
             time_auditing += (now - loop_time)
+            self.statsd.timing_since('timing', loop_time)
+
         elapsed = time.time() - begin
         self.logger.info(_(
             'Object audit (%(type)s) "%(mode)s" mode '
@@ -166,6 +176,7 @@ class AuditorWorker(object):
             finally:
                 df.close(verify_file=False)
         except AuditException, err:
+            self.statsd.increment('quarantine')
             self.quarantines += 1
             self.logger.error(_('ERROR Object %(obj)s failed audit and will '
                 'be quarantined: %(err)s'), {'obj': path, 'err': err})
@@ -173,6 +184,7 @@ class AuditorWorker(object):
                 os.path.join(self.devices, device), path)
             return
         except (Exception, Timeout):
+            self.statsd.increment('error')
             self.errors += 1
             self.logger.exception(_('ERROR Trying to audit %s'), path)
             return

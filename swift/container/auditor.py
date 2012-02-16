@@ -15,6 +15,7 @@
 
 import os
 import time
+import pystatsd
 from random import random
 
 from eventlet import Timeout
@@ -38,6 +39,13 @@ class ContainerAuditor(Daemon):
         swift_dir = conf.get('swift_dir', '/etc/swift')
         self.container_passes = 0
         self.container_failures = 0
+        statsd_host = conf.get('statsd_host', None)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'container-auditor')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def run_forever(self, *args, **kwargs):
         """Run the container audit until stopped."""
@@ -62,6 +70,7 @@ class ContainerAuditor(Daemon):
                         self.container_passes = 0
                         self.container_failures = 0
             except (Exception, Timeout):
+                self.statsd.increment('error')
                 self.logger.exception(_('ERROR auditing'))
             elapsed = time.time() - begin
             if elapsed < self.interval:
@@ -97,15 +106,19 @@ class ContainerAuditor(Daemon):
 
         :param path: the path to a container db
         """
+        start_time = time.time()
         try:
             if not path.endswith('.db'):
                 return
             broker = ContainerBroker(path)
             if not broker.is_deleted():
                 info = broker.get_info()
+                self.statsd.increment('passes')
                 self.container_passes += 1
                 self.logger.debug(_('Audit passed for %s'), broker.db_file)
         except (Exception, Timeout):
+            self.statsd.increment('failures')
             self.container_failures += 1
             self.logger.exception(_('ERROR Could not get container info %s'),
                 (broker.db_file))
+        self.statsd.timing_since('timing', start_time)
