@@ -180,6 +180,7 @@ class ContainerSync(Daemon):
             Ring(os.path.join(swift_dir, 'object.ring.gz'))
         self._myips = whataremyips()
         self._myport = int(conf.get('bind_port', 6001))
+        statsd_host = conf.get('statsd_host', None)
         if statsd_host:
             self.statsd = pystatsd.Client(statsd_host,
                                           int(conf.get('statsd_port', 8125)),

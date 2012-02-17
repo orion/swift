@@ -837,9 +837,9 @@ class ObjectController(Controller):
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
         self.object_name = unquote(object_name)
-        if statsd_host:
-            self.statsd = pystatsd.Client(statsd_host,
-                                          int(conf.get('statsd_port', 8125)),
+        if self.app.statsd_host:
+            self.statsd = pystatsd.Client(self.app.statsd_host,
+                                          self.app.statsd_port,
                                           'proxy-server.object')
         else:
             self.statsd = pystatsd.ClientNop()
@@ -1443,9 +1443,9 @@ class ContainerController(Controller):
         Controller.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
-        if statsd_host:
-            self.statsd = pystatsd.Client(statsd_host,
-                                          int(conf.get('statsd_port', 8125)),
+        if self.app.statsd_host:
+            self.statsd = pystatsd.Client(self.app.statsd_host,
+                                          self.app.statsd_port,
                                           'proxy-server.container')
         else:
             self.statsd = pystatsd.ClientNop()
@@ -1618,9 +1618,9 @@ class AccountController(Controller):
     def __init__(self, app, account_name, **kwargs):
         Controller.__init__(self, app)
         self.account_name = unquote(account_name)
-        if statsd_host:
-            self.statsd = pystatsd.Client(statsd_host,
-                                          int(conf.get('statsd_port', 8125)),
+        if self.app.statsd_host:
+            self.statsd = pystatsd.Client(self.app.statsd_host,
+                                          self.app.statsd_port,
                                           'proxy-server.account')
         else:
             self.statsd = pystatsd.ClientNop()
@@ -1793,6 +1793,8 @@ class BaseApplication(object):
             'expiring_objects'
         self.expiring_objects_container_divisor = \
             int(conf.get('expiring_objects_container_divisor') or 86400)
+        self.statsd_host = conf.get('statsd_host', None)
+        self.statsd_host = conf.get('statsd_port', 8125)
 
     def get_controller(self, path):
         """

@@ -53,6 +53,7 @@ class AccountController(object):
             self.mount_check, logger=self.logger)
         self.auto_create_account_prefix = \
             conf.get('auto_create_account_prefix') or '.'
+        statsd_host = conf.get('statsd_host', None)
         if statsd_host:
             self.statsd = pystatsd.Client(statsd_host,
                                           int(conf.get('statsd_port', 8125)),

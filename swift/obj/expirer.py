@@ -53,6 +53,7 @@ class ObjectExpirer(Daemon):
         self.report_interval = int(conf.get('report_interval') or 300)
         self.report_first_time = self.report_last_time = time()
         self.report_objects = 0
+        statsd_host = conf.get('statsd_host', None)
         if statsd_host:
             self.statsd = pystatsd.Client(statsd_host,
                                           int(conf.get('statsd_port', 8125)),

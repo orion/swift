@@ -38,6 +38,7 @@ class AccountAuditor(Daemon):
         self.interval = int(conf.get('interval', 1800))
         self.account_passes = 0
         self.account_failures = 0
+        statsd_host = conf.get('statsd_host', None)
         if statsd_host:
             self.statsd = pystatsd.Client(statsd_host,
                                           int(conf.get('statsd_port', 8125)),

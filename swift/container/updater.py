@@ -57,6 +57,7 @@ class ContainerUpdater(Daemon):
         self.account_suppression_time = \
             float(conf.get('account_suppression_time', 60))
         self.new_account_suppressions = None
+        statsd_host = conf.get('statsd_host', None)
         if statsd_host:
             self.statsd = pystatsd.Client(statsd_host,
                                           int(conf.get('statsd_port', 8125)),

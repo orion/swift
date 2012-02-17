@@ -73,6 +73,7 @@ class AccountReaper(Daemon):
         self.container_concurrency = self.object_concurrency = \
             sqrt(self.concurrency)
         self.container_pool = GreenPool(size=self.container_concurrency)
+        statsd_host = conf.get('statsd_host', None)
         if statsd_host:
             self.statsd = pystatsd.Client(statsd_host,
                                           int(conf.get('statsd_port', 8125)),
