@@ -1113,7 +1113,7 @@ class ObjectController(Controller):
 
     @public
     @delay_denial
-    def PUT(self, req, start_time=None, stats_type='PUT')):
+    def PUT(self, req, start_time=None, stats_type='PUT'):
         """HTTP PUT request handler."""
         if not start_time:
             start_time = time.time()
