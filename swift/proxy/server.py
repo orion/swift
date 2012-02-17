@@ -34,6 +34,7 @@ import os
 import re
 import time
 import traceback
+import pystatsd
 from ConfigParser import ConfigParser
 from datetime import datetime
 from urllib import unquote, quote
@@ -619,12 +620,12 @@ class Controller(object):
     @public
     def GET(self, req):
         """Handler for HTTP GET requests."""
-        return self.GETorHEAD(req)
+        return self.GETorHEAD(req, stats_type='GET')
 
     @public
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
-        return self.GETorHEAD(req)
+        return self.GETorHEAD(req, stats_type='HEAD')
 
     def _make_app_iter_reader(self, node, source, queue):
         """
@@ -836,14 +837,22 @@ class ObjectController(Controller):
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
         self.object_name = unquote(object_name)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'proxy-server.object')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
-    def GETorHEAD(self, req):
+    def GETorHEAD(self, req, stats_type):
         """Handle HTTP GET or HEAD requests."""
+        start_time = time.time()
         if 'swift.authorize' in req.environ:
             req.acl = \
                 self.container_info(self.account_name, self.container_name)[2]
             aresp = req.environ['swift.authorize'](req)
             if aresp:
+                self.statsd.increment('auth_short_circuit')
                 return aresp
         partition, nodes = self.app.object_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
@@ -889,6 +898,7 @@ class ObjectController(Controller):
                     req.acl = lresp.headers.get('x-container-read')
                     aresp = req.environ['swift.authorize'](req)
                     if aresp:
+                        self.statsd.increment('auth_short_circuit')
                         return aresp
                 sublisting = json.loads(lresp.body)
                 if not sublisting:
@@ -973,31 +983,33 @@ class ObjectController(Controller):
                 resp.etag = etag
             resp.headers['accept-ranges'] = 'bytes'
 
+        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
     @delay_denial
     def GET(self, req):
         """Handler for HTTP GET requests."""
-        return self.GETorHEAD(req)
+        return self.GETorHEAD(req, stats_type='GET')
 
     @public
     @delay_denial
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
-        return self.GETorHEAD(req)
+        return self.GETorHEAD(req, stats_type='HEAD')
 
     @public
     @delay_denial
     def POST(self, req):
         """HTTP POST request handler."""
+        start_time = time.time()
         if 'x-delete-after' in req.headers:
             try:
                 x_delete_after = int(req.headers['x-delete-after'])
             except ValueError:
-                    return HTTPBadRequest(request=req,
-                                          content_type='text/plain',
-                                          body='Non-integer X-Delete-After')
+                return HTTPBadRequest(request=req,
+                                      content_type='text/plain',
+                                      body='Non-integer X-Delete-After')
             req.headers['x-delete-at'] = '%d' % (time.time() + x_delete_after)
         if self.app.object_post_as_copy:
             req.method = 'PUT'
@@ -1007,7 +1019,7 @@ class ObjectController(Controller):
             req.headers['X-Copy-From'] = quote('/%s/%s' % (self.container_name,
                 self.object_name))
             req.headers['X-Fresh-Metadata'] = 'true'
-            resp = self.PUT(req)
+            resp = self.PUT(req, start_time = start_time, stats_type='POST')
             # Older editions returned 202 Accepted on object POSTs, so we'll
             # convert any 201 Created responses to that for compatibility with
             # picky clients.
@@ -1024,6 +1036,7 @@ class ObjectController(Controller):
             if 'swift.authorize' in req.environ:
                 aresp = req.environ['swift.authorize'](req)
                 if aresp:
+                    self.statsd.increment('auth_short_circuit')
                     return aresp
             if not containers:
                 return HTTPNotFound(request=req)
@@ -1061,8 +1074,10 @@ class ObjectController(Controller):
                     nheaders['X-Delete-At-Partition'] = delete_at_part
                     nheaders['X-Delete-At-Device'] = node['device']
                 headers.append(nheaders)
-            return self.make_requests(req, self.app.object_ring,
-                    partition, 'POST', req.path_info, headers)
+            resp = self.make_requests(req, self.app.object_ring, partition,
+                                      'POST', req.path_info, headers)
+            self.statsd.timing_since('POST.timing', start_time)
+            return resp
 
     def _send_file(self, conn, path):
         """Method for a file PUT coro"""
@@ -1098,8 +1113,10 @@ class ObjectController(Controller):
 
     @public
     @delay_denial
-    def PUT(self, req):
+    def PUT(self, req, start_time=None, stats_type='PUT')):
         """HTTP PUT request handler."""
+        if not start_time:
+            start_time = time.time()
         (container_partition, containers, _junk, req.acl,
          req.environ['swift_sync_key']) = \
             self.container_info(self.account_name, self.container_name,
@@ -1107,6 +1124,7 @@ class ObjectController(Controller):
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
+                self.statsd.increment('auth_short_circuit')
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
@@ -1151,6 +1169,7 @@ class ObjectController(Controller):
                 if 'swift_x_timestamp' in hreq.environ and \
                     float(hreq.environ['swift_x_timestamp']) >= \
                         float(req.headers['x-timestamp']):
+                    self.statsd.timing_since('%.timing' % (stats_type,), start_time)
                     return HTTPAccepted(request=req)
             except ValueError:
                 return HTTPBadRequest(request=req, content_type='text/plain',
@@ -1337,18 +1356,21 @@ class ObjectController(Controller):
             # reset the bytes, since the user didn't actually send anything
             req.bytes_transferred = 0
         resp.last_modified = float(req.headers['X-Timestamp'])
+        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
     @delay_denial
     def DELETE(self, req):
         """HTTP DELETE request handler."""
+        start_time = time.time()
         (container_partition, containers, _junk, req.acl,
          req.environ['swift_sync_key']) = \
             self.container_info(self.account_name, self.container_name)
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
+                self.statsd.increment('auth_short_circuit')
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
@@ -1373,13 +1395,16 @@ class ObjectController(Controller):
             nheaders['X-Container-Partition'] = container_partition
             nheaders['X-Container-Device'] = container['device']
             headers.append(nheaders)
-        return self.make_requests(req, self.app.object_ring,
+        resp = self.make_requests(req, self.app.object_ring,
                 partition, 'DELETE', req.path_info, headers)
+        self.statsd.timing_since('DELETE.timing', start_time)
+        return resp
 
     @public
     @delay_denial
     def COPY(self, req):
         """HTTP COPY request handler."""
+        start_time = time.time()
         dest = req.headers.get('Destination')
         if not dest:
             return HTTPPreconditionFailed(request=req,
@@ -1403,7 +1428,7 @@ class ObjectController(Controller):
         req.headers['Content-Length'] = 0
         req.headers['X-Copy-From'] = quote(source)
         del req.headers['Destination']
-        return self.PUT(req)
+        return self.PUT(req, start_time=start_time, stats_type='COPY')
 
 
 class ContainerController(Controller):
@@ -1418,6 +1443,12 @@ class ContainerController(Controller):
         Controller.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'proxy-server.container')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def clean_acls(self, req):
         if 'swift.clean_acl' in req.environ:
@@ -1431,8 +1462,9 @@ class ContainerController(Controller):
                         return HTTPBadRequest(request=req, body=str(err))
         return None
 
-    def GETorHEAD(self, req):
+    def GETorHEAD(self, req, stats_type):
         """Handler for HTTP GET/HEAD requests."""
+        start_time = time.time()
         if not self.account_info(self.account_name)[1]:
             return HTTPNotFound(request=req)
         part, nodes = self.app.container_ring.get_nodes(
@@ -1457,29 +1489,32 @@ class ContainerController(Controller):
             req.acl = resp.headers.get('x-container-read')
             aresp = req.environ['swift.authorize'](req)
             if aresp:
+                self.statsd.increment('auth_short_circuit')
                 return aresp
         if not req.environ.get('swift_owner', False):
             for key in ('x-container-read', 'x-container-write',
                         'x-container-sync-key', 'x-container-sync-to'):
                 if key in resp.headers:
                     del resp.headers[key]
+        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
     @delay_denial
     def GET(self, req):
         """Handler for HTTP GET requests."""
-        return self.GETorHEAD(req)
+        return self.GETorHEAD(req, stats_type='GET')
 
     @public
     @delay_denial
     def HEAD(self, req):
         """Handler for HTTP HEAD requests."""
-        return self.GETorHEAD(req)
+        return self.GETorHEAD(req, stats_type='HEAD')
 
     @public
     def PUT(self, req):
         """HTTP PUT request handler."""
+        start_time = time.time()
         error_response = \
             self.clean_acls(req) or check_metadata(req, 'container')
         if error_response:
@@ -1511,12 +1546,16 @@ class ContainerController(Controller):
             cache_key = get_container_memcache_key(self.account_name,
                                                    self.container_name)
             self.app.memcache.delete(cache_key)
-        return self.make_requests(req, self.app.container_ring,
+        resp = self.make_requests(req, self.app.container_ring,
                 container_partition, 'PUT', req.path_info, headers)
+        self.statsd.timing_since('PUT.timing', start_time)
+        return resp
+
 
     @public
     def POST(self, req):
         """HTTP POST request handler."""
+        start_time = time.time()
         error_response = \
             self.clean_acls(req) or check_metadata(req, 'container')
         if error_response:
@@ -1537,13 +1576,16 @@ class ContainerController(Controller):
             cache_key = get_container_memcache_key(self.account_name,
                                                    self.container_name)
             self.app.memcache.delete(cache_key)
-        return self.make_requests(req, self.app.container_ring,
+        resp = self.make_requests(req, self.app.container_ring,
                 container_partition, 'POST', req.path_info,
                 [headers] * len(containers))
+        self.statsd.timing_since('POST.timing', start_time)
+        return resp
 
     @public
     def DELETE(self, req):
         """HTTP DELETE request handler."""
+        start_time = time.time()
         account_partition, accounts = self.account_info(self.account_name)
         if not accounts:
             return HTTPNotFound(request=req)
@@ -1563,6 +1605,7 @@ class ContainerController(Controller):
             self.app.memcache.delete(cache_key)
         resp = self.make_requests(req, self.app.container_ring,
                     container_partition, 'DELETE', req.path_info, headers)
+        self.statsd.timing_since('DELETE.timing', start_time)
         if resp.status_int == 202:  # Indicates no server had the container
             return HTTPNotFound(request=req)
         return resp
@@ -1575,9 +1618,16 @@ class AccountController(Controller):
     def __init__(self, app, account_name, **kwargs):
         Controller.__init__(self, app)
         self.account_name = unquote(account_name)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'proxy-server.account')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
-    def GETorHEAD(self, req):
+    def GETorHEAD(self, req, stats_type=None):
         """Handler for HTTP GET/HEAD requests."""
+        start_time = time.time()
         partition, nodes = self.app.account_ring.get_nodes(self.account_name)
         shuffle(nodes)
         resp = self.GETorHEAD_base(req, _('Account'), partition, nodes,
@@ -1600,11 +1650,13 @@ class AccountController(Controller):
                                 self.account_name)
             resp = self.GETorHEAD_base(req, _('Account'), partition, nodes,
                 req.path_info.rstrip('/'), self.app.account_ring.replica_count)
+        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
     def PUT(self, req):
         """HTTP PUT request handler."""
+        start_time = time.time()
         if not self.app.allow_account_management:
             return HTTPMethodNotAllowed(request=req)
         error_response = check_metadata(req, 'account')
@@ -1624,12 +1676,15 @@ class AccountController(Controller):
             if value[0].lower().startswith('x-account-meta-'))
         if self.app.memcache:
             self.app.memcache.delete('account%s' % req.path_info.rstrip('/'))
-        return self.make_requests(req, self.app.account_ring,
+        resp = self.make_requests(req, self.app.account_ring,
             account_partition, 'PUT', req.path_info, [headers] * len(accounts))
+        self.statsd.timing_since('PUT.timing', start_time)
+        return resp
 
     @public
     def POST(self, req):
         """HTTP POST request handler."""
+        start_time = time.time()
         error_response = check_metadata(req, 'account')
         if error_response:
             return error_response
@@ -1658,11 +1713,13 @@ class AccountController(Controller):
             if resp.status_int // 100 != 2:
                 raise Exception('Could not autocreate account %r' %
                                 self.account_name)
+        self.statsd.timing_since('POST.timing', start_time)
         return resp
 
     @public
     def DELETE(self, req):
         """HTTP DELETE request handler."""
+        start_time = time.time()
         if not self.app.allow_account_management:
             return HTTPMethodNotAllowed(request=req)
         account_partition, accounts = \
@@ -1672,9 +1729,11 @@ class AccountController(Controller):
                    'Connection': 'close'}
         if self.app.memcache:
             self.app.memcache.delete('account%s' % req.path_info.rstrip('/'))
-        return self.make_requests(req, self.app.account_ring,
+        resp = self.make_requests(req, self.app.account_ring,
             account_partition, 'DELETE', req.path_info,
             [headers] * len(accounts))
+        self.statsd.timing_since('DELETE.timing', start_time)
+        return resp
 
 
 class BaseApplication(object):
@@ -1849,6 +1908,7 @@ class BaseApplication(object):
                     # Response indicates denial, but we might delay the denial
                     # and recheck later. If not delayed, return the error now.
                     if not getattr(handler, 'delay_denial', None):
+                        self.statsd.increment('auth_short_circuit')
                         return resp
             return handler(req)
         except (Exception, Timeout):

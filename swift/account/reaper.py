@@ -18,6 +18,7 @@ import random
 from logging import DEBUG
 from math import sqrt
 from time import time
+import pystatsd
 
 from eventlet import GreenPool, sleep, Timeout
 
@@ -72,6 +73,12 @@ class AccountReaper(Daemon):
         self.container_concurrency = self.object_concurrency = \
             sqrt(self.concurrency)
         self.container_pool = GreenPool(size=self.container_concurrency)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'account-reaper')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def get_account_ring(self):
         """ The account :class:`swift.common.ring.Ring` for the cluster. """
@@ -124,6 +131,7 @@ class AccountReaper(Daemon):
         for device in os.listdir(self.devices):
             if self.mount_check and \
                     not os.path.ismount(os.path.join(self.devices, device)):
+                self.statsd.increment('errors')
                 self.logger.debug(
                     _('Skipping %s as it is not mounted'), device)
                 continue
@@ -167,6 +175,7 @@ class AccountReaper(Daemon):
                         if fname.endswith('.ts'):
                             break
                         elif fname.endswith('.db'):
+                            self.start_time = time.time()
                             broker = \
                                 AccountBroker(os.path.join(hsh_path, fname))
                             if broker.is_status_deleted() and \
@@ -264,6 +273,7 @@ class AccountReaper(Daemon):
             log = log[:-2]
         log += _(', elapsed: %.02fs') % (time() - begin)
         self.logger.info(log)
+        self.statsd.timing_since('timing', self.start_time)
 
     def reap_container(self, account, account_partition, account_nodes,
                        container):
@@ -314,12 +324,14 @@ class AccountReaper(Daemon):
                         response_timeout=self.node_timeout)[1]
                 self.stats_return_codes[2] = \
                     self.stats_return_codes.get(2, 0) + 1
+                self.statsd.increment('return_codes.2')
             except ClientException, err:
                 if self.logger.getEffectiveLevel() <= DEBUG:
                     self.logger.exception(
                         _('Exception with %(ip)s:%(port)s/%(device)s'), node)
                 self.stats_return_codes[err.http_status / 100] = \
                     self.stats_return_codes.get(err.http_status / 100, 0) + 1
+                self.statsd.increment('return_codes.%d' % (err.http_status / 100,))
             if not objects:
                 break
             try:
@@ -349,6 +361,7 @@ class AccountReaper(Daemon):
                 successes += 1
                 self.stats_return_codes[2] = \
                     self.stats_return_codes.get(2, 0) + 1
+                self.statsd.increment('return_codes.2')
             except ClientException, err:
                 if self.logger.getEffectiveLevel() <= DEBUG:
                     self.logger.exception(
@@ -356,12 +369,16 @@ class AccountReaper(Daemon):
                 failures += 1
                 self.stats_return_codes[err.http_status / 100] = \
                     self.stats_return_codes.get(err.http_status / 100, 0) + 1
+                self.statsd.increment('return_codes.%d' % (err.http_status / 100,))
         if successes > failures:
             self.stats_containers_deleted += 1
+            self.statsd.increment('containers_deleted')
         elif not successes:
             self.stats_containers_remaining += 1
+            self.statsd.increment('containers_remaining')
         else:
             self.stats_containers_possibly_remaining += 1
+            self.statsd.increment('containers_possibly_remaining')
 
     def reap_object(self, account, container, container_partition,
                     container_nodes, obj):
@@ -400,16 +417,22 @@ class AccountReaper(Daemon):
                 successes += 1
                 self.stats_return_codes[2] = \
                     self.stats_return_codes.get(2, 0) + 1
+                self.statsd.increment('return_codes.2')
             except ClientException, err:
                 if self.logger.getEffectiveLevel() <= DEBUG:
                     self.logger.exception(
                         _('Exception with %(ip)s:%(port)s/%(device)s'), node)
                 failures += 1
+                self.statsd.increment('failures')
                 self.stats_return_codes[err.http_status / 100] = \
                     self.stats_return_codes.get(err.http_status / 100, 0) + 1
+                self.statsd.increment('return_codes.%d' % (err.http_status / 100,))
             if successes > failures:
                 self.stats_objects_deleted += 1
+                self.statsd.increment('objects_deleted')
             elif not successes:
                 self.stats_objects_remaining += 1
+                self.statsd.increment('objects_remaining')
             else:
                 self.stats_objects_possibly_remaining += 1
+                self.statsd.increment('objects_possibly_remaining')

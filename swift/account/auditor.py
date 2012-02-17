@@ -15,6 +15,7 @@
 
 import os
 import time
+import pystatsd
 from random import random
 
 from swift.account import server as account_server
@@ -37,6 +38,12 @@ class AccountAuditor(Daemon):
         self.interval = int(conf.get('interval', 1800))
         self.account_passes = 0
         self.account_failures = 0
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          int(conf.get('statsd_port', 8125)),
+                                          'account-auditor')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def run_forever(self, *args, **kwargs):
         """Run the account audit until stopped."""
@@ -60,6 +67,7 @@ class AccountAuditor(Daemon):
                         self.account_passes = 0
                         self.account_failures = 0
             except (Exception, Timeout):
+                self.statsd.increment('errors')
                 self.logger.exception(_('ERROR auditing'))
             elapsed = time.time() - begin
             if elapsed < self.interval:
@@ -94,15 +102,19 @@ class AccountAuditor(Daemon):
 
         :param path: the path to an account db
         """
+        start_time = time.time()
         try:
             if not path.endswith('.db'):
                 return
             broker = AccountBroker(path)
             if not broker.is_deleted():
                 info = broker.get_info()
+                self.statsd.increment('passes')
                 self.account_passes += 1
                 self.logger.debug(_('Audit passed for %s') % broker.db_file)
         except (Exception, Timeout):
+            self.statsd.increment('failures')
             self.account_failures += 1
             self.logger.exception(_('ERROR Could not get account info %s'),
                 (broker.db_file))
+        self.statsd.timing_since('timing', start_time)

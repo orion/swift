@@ -70,7 +70,7 @@ class ContainerAuditor(Daemon):
                         self.container_passes = 0
                         self.container_failures = 0
             except (Exception, Timeout):
-                self.statsd.increment('error')
+                self.statsd.increment('errors')
                 self.logger.exception(_('ERROR auditing'))
             elapsed = time.time() - begin
             if elapsed < self.interval:
