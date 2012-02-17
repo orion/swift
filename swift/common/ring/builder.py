@@ -228,6 +228,8 @@ class RingBuilder(object):
         :param dev_id: device id
         """
         dev = self.devs[dev_id]
+        if dev is None:
+            return
         dev['weight'] = 0
         self._remove_devs.append(dev)
         self._set_parts_wanted()
