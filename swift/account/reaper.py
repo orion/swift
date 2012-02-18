@@ -176,7 +176,7 @@ class AccountReaper(Daemon):
                         if fname.endswith('.ts'):
                             break
                         elif fname.endswith('.db'):
-                            self.start_time = time.time()
+                            self.start_time = time()
                             broker = \
                                 AccountBroker(os.path.join(hsh_path, fname))
                             if broker.is_status_deleted() and \

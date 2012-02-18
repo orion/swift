@@ -78,7 +78,7 @@ class ObjectUpdater(Daemon):
             for device in os.listdir(self.devices):
                 if self.mount_check and not \
                         os.path.ismount(os.path.join(self.devices, device)):
-                    self.pystatsd.increment('errors')
+                    self.statsd.increment('errors')
                     self.logger.warn(
                         _('Skipping %s as it is not mounted'), device)
                     continue
@@ -118,7 +118,7 @@ class ObjectUpdater(Daemon):
         for device in os.listdir(self.devices):
             if self.mount_check and \
                     not os.path.ismount(os.path.join(self.devices, device)):
-                self.pystatsd.increment('errors')
+                self.statsd.increment('errors')
                 self.logger.warn(
                     _('Skipping %s as it is not mounted'), device)
                 continue
@@ -151,7 +151,7 @@ class ObjectUpdater(Daemon):
                 try:
                     obj_hash, timestamp = update.split('-')
                 except ValueError:
-                    self.pystatsd.increment('errors')
+                    self.statsd.increment('errors')
                     self.logger.error(
                         _('ERROR async pending file with unexpected name %s')
                         % (update_path))
@@ -180,7 +180,7 @@ class ObjectUpdater(Daemon):
         except Exception:
             self.logger.exception(
                 _('ERROR Pickle problem, quarantining %s'), update_path)
-            self.pystatsd.increment('quarantine')
+            self.statsd.increment('quarantine')
             renamer(update_path, os.path.join(device,
                 'quarantined', 'objects', os.path.basename(update_path)))
             return
@@ -200,13 +200,13 @@ class ObjectUpdater(Daemon):
                     successes.append(node['id'])
         if success:
             self.successes += 1
-            self.pystatsd.increment('successes')
+            self.statsd.increment('successes')
             self.logger.debug(_('Update sent for %(obj)s %(path)s'),
                 {'obj': obj, 'path': update_path})
             os.unlink(update_path)
         else:
             self.failures += 1
-            self.pystatsd.increment('failures')
+            self.statsd.increment('failures')
             self.logger.debug(_('Update failed for %(obj)s %(path)s'),
                 {'obj': obj, 'path': update_path})
             update['successes'] = successes

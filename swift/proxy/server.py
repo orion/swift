@@ -1794,7 +1794,7 @@ class BaseApplication(object):
         self.expiring_objects_container_divisor = \
             int(conf.get('expiring_objects_container_divisor') or 86400)
         self.statsd_host = conf.get('statsd_host', None)
-        self.statsd_host = conf.get('statsd_port', 8125)
+        self.statsd_port = conf.get('statsd_port', 8125)
 
     def get_controller(self, path):
         """
