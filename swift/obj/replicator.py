@@ -407,7 +407,7 @@ class ObjectReplicator(Daemon):
             if isinstance(hashed, BaseException):
                 raise hashed
             self.suffix_hash += hashed
-            self.statsd.update_stats('suffix.hash', hashed)
+            self.statsd.update_stats('suffix.hashes', hashed)
             attempts_left = self.object_ring.replica_count - 1
             nodes = itertools.chain(job['nodes'],
                         self.object_ring.get_more_nodes(int(job['partition'])))
@@ -442,7 +442,7 @@ class ObjectReplicator(Daemon):
                     # See tpooled_get_hashes "Hack".
                     if isinstance(hashed, BaseException):
                         raise hashed
-                    self.statsd.update_stats('suffix.hash', hashed)
+                    self.statsd.update_stats('suffix.hashes', hashed)
                     local_hash = recalc_hash
                     suffixes = [suffix for suffix in local_hash if
                             local_hash[suffix] != remote_hash.get(suffix, -1)]
@@ -454,7 +454,7 @@ class ObjectReplicator(Daemon):
                             headers={'Content-Length': '0'})
                         conn.getresponse().read()
                     self.suffix_sync += len(suffixes)
-                    self.statsd.update_stats('suffix.sync', len(suffixes))
+                    self.statsd.update_stats('suffix.syncs', len(suffixes))
                 except (Exception, Timeout):
                     self.logger.exception(_("Error syncing with node: %s") %
                                             node)

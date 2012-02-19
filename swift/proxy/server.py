@@ -846,7 +846,7 @@ class ObjectController(Controller):
                 self.container_info(self.account_name, self.container_name)[2]
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.app.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuits')
                 return aresp
         partition, nodes = self.app.object_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
@@ -892,7 +892,7 @@ class ObjectController(Controller):
                     req.acl = lresp.headers.get('x-container-read')
                     aresp = req.environ['swift.authorize'](req)
                     if aresp:
-                        self.app.statsd.increment('auth_short_circuit')
+                        self.app.statsd.increment('auth_short_circuits')
                         return aresp
                 sublisting = json.loads(lresp.body)
                 if not sublisting:
@@ -1030,7 +1030,7 @@ class ObjectController(Controller):
             if 'swift.authorize' in req.environ:
                 aresp = req.environ['swift.authorize'](req)
                 if aresp:
-                    self.app.statsd.increment('auth_short_circuit')
+                    self.app.statsd.increment('auth_short_circuits')
                     return aresp
             if not containers:
                 return HTTPNotFound(request=req)
@@ -1118,7 +1118,7 @@ class ObjectController(Controller):
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.app.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuits')
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
@@ -1364,7 +1364,7 @@ class ObjectController(Controller):
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.app.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuits')
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
@@ -1477,7 +1477,7 @@ class ContainerController(Controller):
             req.acl = resp.headers.get('x-container-read')
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.app.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuits')
                 return aresp
         if not req.environ.get('swift_owner', False):
             for key in ('x-container-read', 'x-container-write',
@@ -1906,7 +1906,7 @@ class BaseApplication(object):
                     # Response indicates denial, but we might delay the denial
                     # and recheck later. If not delayed, return the error now.
                     if not getattr(handler, 'delay_denial', None):
-                        self.statsd.increment('auth_short_circuit')
+                        self.statsd.increment('auth_short_circuits')
                         return resp
             return handler(req)
         except (Exception, Timeout):

@@ -426,7 +426,7 @@ class ObjectController(object):
                     {'ip': ip, 'port': port, 'dev': contdevice})
         async_dir = os.path.join(self.devices, objdevice, ASYNCDIR)
         ohash = hash_path(account, container, obj)
-        self.statsd.increment('async_pending')
+        self.statsd.increment('async_pendings')
         write_pickle(
             {'op': op, 'account': account, 'container': container,
                 'obj': obj, 'headers': headers_out},
@@ -491,21 +491,21 @@ class ObjectController(object):
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
         if 'x-timestamp' not in request.headers or \
                     not check_float(request.headers['x-timestamp']):
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
         new_delete_at = int(request.headers.get('X-Delete-At') or 0)
         if new_delete_at and new_delete_at < time.time():
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return HTTPBadRequest(body='X-Delete-At in past', request=request,
                                   content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
@@ -522,7 +522,6 @@ class ObjectController(object):
             file_size = file.get_data_file_size()
         except (DiskFileError, DiskFileNotExist):
             file.quarantine()
-            self.statsd.increment('POST.quarantine')
             return HTTPNotFound(request=request)
         metadata = {'X-Timestamp': request.headers['x-timestamp']}
         metadata.update(val for val in request.headers.iteritems()
@@ -551,24 +550,24 @@ class ObjectController(object):
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return Response(status='507 %s is not mounted' % device)
         if 'x-timestamp' not in request.headers or \
                     not check_float(request.headers['x-timestamp']):
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
         error_response = check_object_creation(request, obj)
         if error_response:
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return error_response
         new_delete_at = int(request.headers.get('X-Delete-At') or 0)
         if new_delete_at and new_delete_at < time.time():
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return HTTPBadRequest(body='X-Delete-At in past', request=request,
                                   content_type='text/plain')
         file = DiskFile(self.devices, device, partition, account, container,
@@ -585,7 +584,7 @@ class ObjectController(object):
             for chunk in iter(lambda: reader(self.network_chunk_size), ''):
                 upload_size += len(chunk)
                 if time.time() > upload_expiration:
-                    self.statsd.increment('PUT.timeout')
+                    self.statsd.increment('PUT.timeouts')
                     return HTTPRequestTimeout(request=request)
                 etag.update(chunk)
                 while chunk:
@@ -648,11 +647,11 @@ class ObjectController(object):
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return HTTPBadRequest(body=str(err), request=request,
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, keep_data_fp=True,
@@ -669,7 +668,6 @@ class ObjectController(object):
             file_size = file.get_data_file_size()
         except (DiskFileError, DiskFileNotExist):
             file.quarantine()
-            self.statsd.increment('GET.quarantine')
             return HTTPNotFound(request=request)
         if request.headers.get('if-match') not in (None, '*') and \
                 file.metadata['ETag'] not in request.if_match:
@@ -729,13 +727,13 @@ class ObjectController(object):
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, err:
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             resp = HTTPBadRequest(request=request)
             resp.content_type = 'text/plain'
             resp.body = str(err)
             return resp
         if self.mount_check and not check_mount(self.devices, device):
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return Response(status='507 %s is not mounted' % device)
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, disk_chunk_size=self.disk_chunk_size)
@@ -747,7 +745,6 @@ class ObjectController(object):
             file_size = file.get_data_file_size()
         except (DiskFileError, DiskFileNotExist):
             file.quarantine()
-            self.statsd.increment('HEAD.quarantine')
             return HTTPNotFound(request=request)
         response = Response(request=request, conditional_response=True)
         response.headers['Content-Type'] = file.metadata.get('Content-Type',
@@ -774,16 +771,16 @@ class ObjectController(object):
             device, partition, account, container, obj = \
                 split_path(unquote(request.path), 5, 5, True)
         except ValueError, e:
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return HTTPBadRequest(body=str(e), request=request,
                         content_type='text/plain')
         if 'x-timestamp' not in request.headers or \
                     not check_float(request.headers['x-timestamp']):
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return HTTPBadRequest(body='Missing timestamp', request=request,
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return Response(status='507 %s is not mounted' % device)
         response_class = HTTPNoContent
         file = DiskFile(self.devices, device, partition, account, container,
@@ -826,11 +823,11 @@ class ObjectController(object):
             device, partition, suffix = split_path(
                 unquote(request.path), 2, 3, True)
         except ValueError, e:
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return HTTPBadRequest(body=str(e), request=request,
                                   content_type='text/plain')
         if self.mount_check and not check_mount(self.devices, device):
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return Response(status='507 %s is not mounted' % device)
         path = os.path.join(self.devices, device, DATADIR, partition)
         if not os.path.exists(path):
@@ -840,7 +837,7 @@ class ObjectController(object):
                                       recalculate=suffixes)
         # See tpooled_get_hashes "Hack".
         if isinstance(hashes, BaseException):
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             raise hashes
         self.statsd.timing_since('REPLICATE.timing', start_time)
         return Response(body=pickle.dumps(hashes))

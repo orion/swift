@@ -73,15 +73,15 @@ class AccountController(object):
         try:
             drive, part, account = split_path(unquote(req.path), 3)
         except ValueError, err:
-            self.statsd.increment('DELETE.error')
+            self.statsd.increment('DELETE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                                     request=req)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('DELETE.error')
+            self.statsd.increment('DELETE.errors')
             return Response(status='507 %s is not mounted' % drive)
         if 'x-timestamp' not in req.headers or \
                     not check_float(req.headers['x-timestamp']):
-            self.statsd.increment('DELETE.error')
+            self.statsd.increment('DELETE.errors')
             return HTTPBadRequest(body='Missing timestamp', request=req,
                         content_type='text/plain')
         broker = self._get_account_broker(drive, part, account)
@@ -99,11 +99,11 @@ class AccountController(object):
             drive, part, account, container = split_path(unquote(req.path),
                                                          3, 4)
         except ValueError, err:
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_account_broker(drive, part, account)
         if container:   # put account container
@@ -139,7 +139,7 @@ class AccountController(object):
                 created = broker.is_deleted()
                 broker.update_put_timestamp(timestamp)
                 if broker.is_deleted():
-                    self.statsd.increment('PUT.error')
+                    self.statsd.increment('PUT.errors')
                     return HTTPConflict(request=req)
             metadata = {}
             metadata.update((key, (value, timestamp))
@@ -166,11 +166,11 @@ class AccountController(object):
             drive, part, account, container = split_path(unquote(req.path),
                                                          3, 4)
         except ValueError, err:
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                                     request=req)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_account_broker(drive, part, account)
         if not container:
@@ -202,11 +202,11 @@ class AccountController(object):
         try:
             drive, part, account = split_path(unquote(req.path), 3)
         except ValueError, err:
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                                     request=req)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_account_broker(drive, part, account)
         broker.pending_timeout = 0.1
@@ -229,21 +229,21 @@ class AccountController(object):
             delimiter = get_param(req, 'delimiter')
             if delimiter and (len(delimiter) > 1 or ord(delimiter) > 254):
                 # delimiters can be made more flexible later
-                self.statsd.increment('GET.error')
+                self.statsd.increment('GET.errors')
                 return HTTPPreconditionFailed(body='Bad delimiter')
             limit = ACCOUNT_LISTING_LIMIT
             given_limit = get_param(req, 'limit')
             if given_limit and given_limit.isdigit():
                 limit = int(given_limit)
                 if limit > ACCOUNT_LISTING_LIMIT:
-                    self.statsd.increment('GET.error')
+                    self.statsd.increment('GET.errors')
                     return  HTTPPreconditionFailed(request=req,
                         body='Maximum limit is %d' % ACCOUNT_LISTING_LIMIT)
             marker = get_param(req, 'marker', '')
             end_marker = get_param(req, 'end_marker')
             query_format = get_param(req, 'format')
         except UnicodeDecodeError, err:
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return HTTPBadRequest(body='parameters not utf8',
                                   content_type='text/plain', request=req)
         if query_format:
@@ -254,7 +254,7 @@ class AccountController(object):
                                      'application/xml', 'text/xml'],
                                     default_match='text/plain')
         except AssertionError, err:
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return HTTPBadRequest(body='bad accept header: %s' % req.accept,
                                   content_type='text/plain', request=req)
         account_list = broker.list_containers_iter(limit, marker, end_marker,
@@ -305,17 +305,17 @@ class AccountController(object):
         try:
             post_args = split_path(unquote(req.path), 3)
         except ValueError, err:
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                                     request=req)
         drive, partition, hash = post_args
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return Response(status='507 %s is not mounted' % drive)
         try:
             args = simplejson.load(req.environ['wsgi.input'])
         except ValueError, err:
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain')
         ret = self.replicator_rpc.dispatch(post_args, args)
         ret.request = req
@@ -328,16 +328,16 @@ class AccountController(object):
         try:
             drive, part, account = split_path(unquote(req.path), 3)
         except ValueError, err:
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
         if 'x-timestamp' not in req.headers or \
                 not check_float(req.headers['x-timestamp']):
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return HTTPBadRequest(body='Missing or bad timestamp',
                 request=req, content_type='text/plain')
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_account_broker(drive, part, account)
         if broker.is_deleted():

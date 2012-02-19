@@ -176,7 +176,7 @@ class AuditorWorker(object):
             finally:
                 df.close(verify_file=False)
         except AuditException, err:
-            self.statsd.increment('quarantine')
+            self.statsd.increment('quarantines')
             self.quarantines += 1
             self.logger.error(_('ERROR Object %(obj)s failed audit and will '
                 'be quarantined: %(err)s'), {'obj': path, 'err': err})
@@ -184,7 +184,7 @@ class AuditorWorker(object):
                 os.path.join(self.devices, device), path)
             return
         except (Exception, Timeout):
-            self.statsd.increment('error')
+            self.statsd.increment('errors')
             self.errors += 1
             self.logger.exception(_('ERROR Trying to audit %s'), path)
             return

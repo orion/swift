@@ -146,16 +146,16 @@ class ContainerController(object):
             drive, part, account, container, obj = split_path(
                 unquote(req.path), 4, 5, True)
         except ValueError, err:
-            self.statsd.increment('DELETE.error')
+            self.statsd.increment('DELETE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                 request=req)
         if 'x-timestamp' not in req.headers or \
                     not check_float(req.headers['x-timestamp']):
-            self.statsd.increment('DELETE.error')
+            self.statsd.increment('DELETE.errors')
             return HTTPBadRequest(body='Missing timestamp', request=req,
                         content_type='text/plain')
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('DELETE.error')
+            self.statsd.increment('DELETE.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_container_broker(drive, part, account, container)
         if account.startswith(self.auto_create_account_prefix) and obj and \
@@ -172,13 +172,13 @@ class ContainerController(object):
         else:
             # delete container
             if not broker.empty():
-                self.statsd.increment('DELETE.error')
+                self.statsd.increment('DELETE.errors')
                 return HTTPConflict(request=req)
             existed = float(broker.get_info()['put_timestamp']) and \
                       not broker.is_deleted()
             broker.delete_db(req.headers['X-Timestamp'])
             if not broker.is_deleted():
-                self.statsd.increment('DELETE.error')
+                self.statsd.increment('DELETE.errors')
                 return HTTPConflict(request=req)
             resp = self.account_update(req, account, container, broker)
             self.statsd.timing_since('DELETE.timing', start_time)
@@ -195,22 +195,22 @@ class ContainerController(object):
             drive, part, account, container, obj = split_path(
                 unquote(req.path), 4, 5, True)
         except ValueError, err:
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                 request=req)
         if 'x-timestamp' not in req.headers or \
                     not check_float(req.headers['x-timestamp']):
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return HTTPBadRequest(body='Missing timestamp', request=req,
                         content_type='text/plain')
         if 'x-container-sync-to' in req.headers:
             err = validate_sync_to(req.headers['x-container-sync-to'],
                                    self.allowed_sync_hosts)
             if err:
-                self.statsd.increment('PUT.error')
+                self.statsd.increment('PUT.errors')
                 return HTTPBadRequest(err)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('PUT.error')
+            self.statsd.increment('PUT.errors')
             return Response(status='507 %s is not mounted' % drive)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])
         broker = self._get_container_broker(drive, part, account, container)
@@ -233,7 +233,7 @@ class ContainerController(object):
                 created = broker.is_deleted()
                 broker.update_put_timestamp(timestamp)
                 if broker.is_deleted():
-                    self.statsd.increment('PUT.error')
+                    self.statsd.increment('PUT.errors')
                     return HTTPConflict(request=req)
             metadata = {}
             metadata.update((key, (value, timestamp))
@@ -263,11 +263,11 @@ class ContainerController(object):
             drive, part, account, container, obj = split_path(
                 unquote(req.path), 4, 5, True)
         except ValueError, err:
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                 request=req)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('HEAD.error')
+            self.statsd.increment('HEAD.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_container_broker(drive, part, account, container)
         broker.pending_timeout = 0.1
@@ -296,11 +296,11 @@ class ContainerController(object):
             drive, part, account, container, obj = split_path(
                 unquote(req.path), 4, 5, True)
         except ValueError, err:
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                 request=req)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_container_broker(drive, part, account, container)
         broker.pending_timeout = 0.1
@@ -337,7 +337,7 @@ class ContainerController(object):
                         body='Maximum limit is %d' % CONTAINER_LISTING_LIMIT)
             query_format = get_param(req, 'format')
         except UnicodeDecodeError, err:
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return HTTPBadRequest(body='parameters not utf8',
                                   content_type='text/plain', request=req)
         if query_format:
@@ -348,7 +348,7 @@ class ContainerController(object):
                                      'application/xml', 'text/xml'],
                                     default_match='text/plain')
         except AssertionError, err:
-            self.statsd.increment('GET.error')
+            self.statsd.increment('GET.errors')
             return HTTPBadRequest(body='bad accept header: %s' % req.accept,
                                   content_type='text/plain', request=req)
         container_list = broker.list_objects_iter(limit, marker, end_marker,
@@ -418,17 +418,17 @@ class ContainerController(object):
         try:
             post_args = split_path(unquote(req.path), 3)
         except ValueError, err:
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                 request=req)
         drive, partition, hash = post_args
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return Response(status='507 %s is not mounted' % drive)
         try:
             args = simplejson.load(req.environ['wsgi.input'])
         except ValueError, err:
-            self.statsd.increment('REPLICATE.error')
+            self.statsd.increment('REPLICATE.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain')
         ret = self.replicator_rpc.dispatch(post_args, args)
         ret.request = req
@@ -441,22 +441,22 @@ class ContainerController(object):
         try:
             drive, part, account, container = split_path(unquote(req.path), 4)
         except ValueError, err:
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
         if 'x-timestamp' not in req.headers or \
                 not check_float(req.headers['x-timestamp']):
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return HTTPBadRequest(body='Missing or bad timestamp',
                 request=req, content_type='text/plain')
         if 'x-container-sync-to' in req.headers:
             err = validate_sync_to(req.headers['x-container-sync-to'],
                                    self.allowed_sync_hosts)
             if err:
-                self.statsd.increment('POST.error')
+                self.statsd.increment('POST.errors')
                 return HTTPBadRequest(err)
         if self.mount_check and not check_mount(self.root, drive):
-            self.statsd.increment('POST.error')
+            self.statsd.increment('POST.errors')
             return Response(status='507 %s is not mounted' % drive)
         broker = self._get_container_broker(drive, part, account, container)
         if broker.is_deleted():
