@@ -837,12 +837,6 @@ class ObjectController(Controller):
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
         self.object_name = unquote(object_name)
-        if self.app.statsd_host:
-            self.statsd = pystatsd.Client(self.app.statsd_host,
-                                          self.app.statsd_port,
-                                          'proxy-server.object')
-        else:
-            self.statsd = pystatsd.ClientNop()
 
     def GETorHEAD(self, req, stats_type):
         """Handle HTTP GET or HEAD requests."""
@@ -852,7 +846,7 @@ class ObjectController(Controller):
                 self.container_info(self.account_name, self.container_name)[2]
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuit')
                 return aresp
         partition, nodes = self.app.object_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
@@ -898,7 +892,7 @@ class ObjectController(Controller):
                     req.acl = lresp.headers.get('x-container-read')
                     aresp = req.environ['swift.authorize'](req)
                     if aresp:
-                        self.statsd.increment('auth_short_circuit')
+                        self.app.statsd.increment('auth_short_circuit')
                         return aresp
                 sublisting = json.loads(lresp.body)
                 if not sublisting:
@@ -983,7 +977,7 @@ class ObjectController(Controller):
                 resp.etag = etag
             resp.headers['accept-ranges'] = 'bytes'
 
-        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
+        self.app.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
@@ -1036,7 +1030,7 @@ class ObjectController(Controller):
             if 'swift.authorize' in req.environ:
                 aresp = req.environ['swift.authorize'](req)
                 if aresp:
-                    self.statsd.increment('auth_short_circuit')
+                    self.app.statsd.increment('auth_short_circuit')
                     return aresp
             if not containers:
                 return HTTPNotFound(request=req)
@@ -1076,7 +1070,7 @@ class ObjectController(Controller):
                 headers.append(nheaders)
             resp = self.make_requests(req, self.app.object_ring, partition,
                                       'POST', req.path_info, headers)
-            self.statsd.timing_since('POST.timing', start_time)
+            self.app.statsd.timing_since('POST.timing', start_time)
             return resp
 
     def _send_file(self, conn, path):
@@ -1124,7 +1118,7 @@ class ObjectController(Controller):
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuit')
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
@@ -1169,7 +1163,7 @@ class ObjectController(Controller):
                 if 'swift_x_timestamp' in hreq.environ and \
                     float(hreq.environ['swift_x_timestamp']) >= \
                         float(req.headers['x-timestamp']):
-                    self.statsd.timing_since('%.timing' % (stats_type,), start_time)
+                    self.app.statsd.timing_since('%.timing' % (stats_type,), start_time)
                     return HTTPAccepted(request=req)
             except ValueError:
                 return HTTPBadRequest(request=req, content_type='text/plain',
@@ -1356,7 +1350,7 @@ class ObjectController(Controller):
             # reset the bytes, since the user didn't actually send anything
             req.bytes_transferred = 0
         resp.last_modified = float(req.headers['X-Timestamp'])
-        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
+        self.app.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
@@ -1370,7 +1364,7 @@ class ObjectController(Controller):
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuit')
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
@@ -1397,7 +1391,7 @@ class ObjectController(Controller):
             headers.append(nheaders)
         resp = self.make_requests(req, self.app.object_ring,
                 partition, 'DELETE', req.path_info, headers)
-        self.statsd.timing_since('DELETE.timing', start_time)
+        self.app.statsd.timing_since('DELETE.timing', start_time)
         return resp
 
     @public
@@ -1443,12 +1437,6 @@ class ContainerController(Controller):
         Controller.__init__(self, app)
         self.account_name = unquote(account_name)
         self.container_name = unquote(container_name)
-        if self.app.statsd_host:
-            self.statsd = pystatsd.Client(self.app.statsd_host,
-                                          self.app.statsd_port,
-                                          'proxy-server.container')
-        else:
-            self.statsd = pystatsd.ClientNop()
 
     def clean_acls(self, req):
         if 'swift.clean_acl' in req.environ:
@@ -1489,14 +1477,14 @@ class ContainerController(Controller):
             req.acl = resp.headers.get('x-container-read')
             aresp = req.environ['swift.authorize'](req)
             if aresp:
-                self.statsd.increment('auth_short_circuit')
+                self.app.statsd.increment('auth_short_circuit')
                 return aresp
         if not req.environ.get('swift_owner', False):
             for key in ('x-container-read', 'x-container-write',
                         'x-container-sync-key', 'x-container-sync-to'):
                 if key in resp.headers:
                     del resp.headers[key]
-        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
+        self.app.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
@@ -1548,7 +1536,7 @@ class ContainerController(Controller):
             self.app.memcache.delete(cache_key)
         resp = self.make_requests(req, self.app.container_ring,
                 container_partition, 'PUT', req.path_info, headers)
-        self.statsd.timing_since('PUT.timing', start_time)
+        self.app.statsd.timing_since('PUT.timing', start_time)
         return resp
 
 
@@ -1579,7 +1567,7 @@ class ContainerController(Controller):
         resp = self.make_requests(req, self.app.container_ring,
                 container_partition, 'POST', req.path_info,
                 [headers] * len(containers))
-        self.statsd.timing_since('POST.timing', start_time)
+        self.app.statsd.timing_since('POST.timing', start_time)
         return resp
 
     @public
@@ -1605,7 +1593,7 @@ class ContainerController(Controller):
             self.app.memcache.delete(cache_key)
         resp = self.make_requests(req, self.app.container_ring,
                     container_partition, 'DELETE', req.path_info, headers)
-        self.statsd.timing_since('DELETE.timing', start_time)
+        self.app.statsd.timing_since('DELETE.timing', start_time)
         if resp.status_int == 202:  # Indicates no server had the container
             return HTTPNotFound(request=req)
         return resp
@@ -1618,12 +1606,6 @@ class AccountController(Controller):
     def __init__(self, app, account_name, **kwargs):
         Controller.__init__(self, app)
         self.account_name = unquote(account_name)
-        if self.app.statsd_host:
-            self.statsd = pystatsd.Client(self.app.statsd_host,
-                                          self.app.statsd_port,
-                                          'proxy-server.account')
-        else:
-            self.statsd = pystatsd.ClientNop()
 
     def GETorHEAD(self, req, stats_type=None):
         """Handler for HTTP GET/HEAD requests."""
@@ -1650,7 +1632,7 @@ class AccountController(Controller):
                                 self.account_name)
             resp = self.GETorHEAD_base(req, _('Account'), partition, nodes,
                 req.path_info.rstrip('/'), self.app.account_ring.replica_count)
-        self.statsd.timing_since('%s.timing' % (stats_type,), start_time)
+        self.app.statsd.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
     @public
@@ -1678,7 +1660,7 @@ class AccountController(Controller):
             self.app.memcache.delete('account%s' % req.path_info.rstrip('/'))
         resp = self.make_requests(req, self.app.account_ring,
             account_partition, 'PUT', req.path_info, [headers] * len(accounts))
-        self.statsd.timing_since('PUT.timing', start_time)
+        self.app.statsd.timing_since('PUT.timing', start_time)
         return resp
 
     @public
@@ -1713,7 +1695,7 @@ class AccountController(Controller):
             if resp.status_int // 100 != 2:
                 raise Exception('Could not autocreate account %r' %
                                 self.account_name)
-        self.statsd.timing_since('POST.timing', start_time)
+        self.app.statsd.timing_since('POST.timing', start_time)
         return resp
 
     @public
@@ -1732,7 +1714,7 @@ class AccountController(Controller):
         resp = self.make_requests(req, self.app.account_ring,
             account_partition, 'DELETE', req.path_info,
             [headers] * len(accounts))
-        self.statsd.timing_since('DELETE.timing', start_time)
+        self.app.statsd.timing_since('DELETE.timing', start_time)
         return resp
 
 
@@ -1793,8 +1775,13 @@ class BaseApplication(object):
             'expiring_objects'
         self.expiring_objects_container_divisor = \
             int(conf.get('expiring_objects_container_divisor') or 86400)
-        self.statsd_host = conf.get('statsd_host', None)
-        self.statsd_port = conf.get('statsd_port', 8125)
+        statsd_host = conf.get('statsd_host', None)
+        if statsd_host:
+            self.statsd = pystatsd.Client(statsd_host,
+                                          conf.get('statsd_port', 8125),
+                                          'proxy-server')
+        else:
+            self.statsd = pystatsd.ClientNop()
 
     def get_controller(self, path):
         """
@@ -1803,7 +1790,7 @@ class BaseApplication(object):
         :param path: path from request
         :returns: tuple of (controller class, path dictionary)
 
-        :raises: ValueError (thrown by split_path) id given invalid path
+        :raises: ValueError (thrown by split_path) if given invalid path
         """
         version, account, container, obj = split_path(path, 1, 4, True)
         d = dict(version=version,
@@ -1869,17 +1856,22 @@ class BaseApplication(object):
         """
         try:
             if req.content_length and req.content_length < 0:
+                self.statsd.increment('errors')
                 return HTTPBadRequest(request=req,
                                       body='Invalid Content-Length')
             try:
                 controller, path_parts = self.get_controller(req.path)
             except ValueError:
+                self.statsd.increment('errors')
                 return HTTPNotFound(request=req)
             if not check_utf8(req.path_info):
+                self.statsd.increment('errors')
                 return HTTPPreconditionFailed(request=req, body='Invalid UTF8')
             if not controller:
+                self.statsd.increment('errors')
                 return HTTPPreconditionFailed(request=req, body='Bad URL')
 
+            self.statsd.prefix += '.' + controller.server_type
             controller = controller(self, **path_parts)
             if 'swift.trans_id' not in req.environ:
                 # if this wasn't set by an earlier middleware, set it now
@@ -1896,6 +1888,7 @@ class BaseApplication(object):
             except AttributeError:
                 handler = None
             if not handler:
+                self.statsd.increment('method_not_allowed')
                 return HTTPMethodNotAllowed(request=req)
             if path_parts['version']:
                 req.path_info_pop()

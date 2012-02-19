@@ -486,7 +486,6 @@ class ObjectController(object):
 
     def POST(self, request):
         """Handle HTTP POST requests for the Swift Object Server."""
-        self.statsd.increment('POST.count')
         start_time = time.time()
         try:
             device, partition, account, container, obj = \
@@ -547,7 +546,6 @@ class ObjectController(object):
 
     def PUT(self, request):
         """Handle HTTP PUT requests for the Swift Object Server."""
-        self.statsd.increment('PUT.count')
         start_time = time.time()
         try:
             device, partition, account, container, obj = \
@@ -645,7 +643,6 @@ class ObjectController(object):
 
     def GET(self, request):
         """Handle HTTP GET requests for the Swift Object Server."""
-        self.statsd.increment('GET.count')
         start_time = time.time()
         try:
             device, partition, account, container, obj = \
