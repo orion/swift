@@ -1871,7 +1871,7 @@ class BaseApplication(object):
                 self.statsd.increment('errors')
                 return HTTPPreconditionFailed(request=req, body='Bad URL')
 
-            self.statsd.prefix += '.' + controller.server_type
+            self.statsd.prefix = 'proxy-server.' + controller.server_type
             controller = controller(self, **path_parts)
             if 'swift.trans_id' not in req.environ:
                 # if this wasn't set by an earlier middleware, set it now
