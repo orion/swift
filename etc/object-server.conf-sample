@@ -29,6 +29,10 @@ use = egg:swift#object
 # set log_facility = LOG_LOCAL0
 # set log_level = INFO
 # set log_requests = True
+# You can override the default statsD logging config for this app here:
+# log_statsd_host = localhost
+# log_statsd_port = 8125
+# log_statsd_default_sample_rate = 1
 # node_timeout = 3
 # conn_timeout = 0.5
 # network_chunk_size = 65536
@@ -53,6 +57,10 @@ recon_lock_path = /var/lock
 # log_name = object-replicator
 # log_facility = LOG_LOCAL0
 # log_level = INFO
+# You can override the default statsD logging config for this app here:
+# log_statsd_host = localhost
+# log_statsd_port = 8125
+# log_statsd_default_sample_rate = 1
 # vm_test_mode = no
 # daemonize = on
 # run_pause = 30
@@ -78,6 +86,10 @@ recon_lock_path = /var/lock
 # log_name = object-updater
 # log_facility = LOG_LOCAL0
 # log_level = INFO
+# You can override the default statsD logging config for this app here:
+# log_statsd_host = localhost
+# log_statsd_port = 8125
+# log_statsd_default_sample_rate = 1
 # interval = 300
 # concurrency = 1
 # node_timeout = 10
@@ -90,6 +102,10 @@ recon_lock_path = /var/lock
 # log_name = object-auditor
 # log_facility = LOG_LOCAL0
 # log_level = INFO
+# You can override the default statsD logging config for this app here:
+# log_statsd_host = localhost
+# log_statsd_port = 8125
+# log_statsd_default_sample_rate = 1
 # files_per_second = 20
 # bytes_per_second = 10000000
 # log_time = 3600

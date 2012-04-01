@@ -39,6 +39,10 @@ except ImportError:
 import cPickle as pickle
 import glob
 from urlparse import urlparse as stdlib_urlparse, ParseResult
+try:
+    import pystatsd
+except ImportError:
+    pass
 
 import eventlet
 from eventlet import GreenPool, sleep
