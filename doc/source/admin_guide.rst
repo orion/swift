@@ -332,8 +332,7 @@ Reporting Metrics to StatsD
 
 If you have a StatsD_ server running, Swift may be configured to send it
 real-time operational metrics.  To enable this, set the following
-configuration entries (see the sample configuration files) and install
-pystatsd_ on each storage and proxy node::
+configuration entries (see the sample configuration files)::
 
     log_statsd_host = localhost
     log_statsd_port = 8125
@@ -344,7 +343,6 @@ If `log_statsd_host` is not set, this feature is disabled, while
 values above.
 
 .. _StatsD: http://codeascraft.etsy.com/2011/02/15/measure-anything-measure-everything/
-.. _pystatsd: http://pypi.python.org/pypi/pystatsd/
 .. _Graphite: http://graphite.wikidot.com/
 .. _Ganglia: http://ganglia.sourceforge.net/
 
