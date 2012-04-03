@@ -38,7 +38,7 @@ import simplejson
 from webob import Request, Response
 from webob.exc import HTTPNotFound, HTTPUnauthorized
 
-from test.unit import connect_tcp, readuntil2crlfs
+from test.unit import connect_tcp, readuntil2crlfs, FakeLogger
 from swift.proxy import server as proxy_server
 from swift.account import server as account_server
 from swift.container import server as container_server
@@ -309,12 +309,6 @@ class FakeMemcacheReturnsNone(FakeMemcache):
         # Returns None as the timestamp of the container; assumes we're only
         # using the FakeMemcache for container existence checks.
         return None
-
-
-class NullLoggingHandler(logging.Handler):
-
-    def emit(self, record):
-        pass
 
 
 @contextmanager
@@ -728,7 +722,7 @@ class TestProxyServer(unittest.TestCase):
         swift_dir = mkdtemp()
         try:
             baseapp = proxy_server.BaseApplication({'swift_dir': swift_dir},
-                FakeMemcache(), NullLoggingHandler(), FakeRing(), FakeRing(),
+                FakeMemcache(), FakeLogger(), FakeRing(), FakeRing(),
                 FakeRing())
             resp = baseapp.handle_request(
                 Request.blank('/', environ={'CONTENT_LENGTH': '-1'}))
@@ -801,7 +795,7 @@ class TestObjectController(unittest.TestCase):
             with open(os.path.join(swift_dir, 'mime.types'), 'w') as fp:
                 fp.write('foo/bar foo\n')
             ba = proxy_server.BaseApplication({'swift_dir': swift_dir},
-                FakeMemcache(), NullLoggingHandler(), FakeRing(), FakeRing(),
+                FakeMemcache(), FakeLogger(), FakeRing(), FakeRing(),
                 FakeRing())
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.foo')[0],
                               'foo/bar')
@@ -2129,13 +2123,8 @@ class TestObjectController(unittest.TestCase):
         (prolis, acc1lis, acc2lis, con2lis, con2lis, obj1lis, obj2lis) = \
                  _test_sockets
 
-        class Logger(object):
-
-            def info(self, msg):
-                self.msg = msg
-
         orig_logger, orig_access_logger = prosrv.logger, prosrv.access_logger
-        prosrv.logger = prosrv.access_logger = Logger()
+        prosrv.logger = prosrv.access_logger = FakeLogger()
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
         fd.write(
@@ -2148,7 +2137,8 @@ class TestObjectController(unittest.TestCase):
         exp = 'HTTP/1.1 200'
         self.assertEquals(headers[:len(exp)], exp)
         exp = '127.0.0.1 127.0.0.1'
-        self.assert_(exp in prosrv.logger.msg)
+        self.assertEquals(prosrv.logger.log_dict['exception'], [])
+        self.assert_(exp in prosrv.logger.log_dict['info'][-1][0][0])
 
     def test_chunked_put_logging(self):
         # GET account with a query string to test that
@@ -2159,13 +2149,8 @@ class TestObjectController(unittest.TestCase):
         (prolis, acc1lis, acc2lis, con2lis, con2lis, obj1lis, obj2lis) = \
                  _test_sockets
 
-        class Logger(object):
-
-            def info(self, msg):
-                self.msg = msg
-
         orig_logger, orig_access_logger = prosrv.logger, prosrv.access_logger
-        prosrv.logger = prosrv.access_logger = Logger()
+        prosrv.logger = prosrv.access_logger = FakeLogger()
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
         fd.write(
@@ -2177,13 +2162,14 @@ class TestObjectController(unittest.TestCase):
         headers = readuntil2crlfs(fd)
         exp = 'HTTP/1.1 200'
         self.assertEquals(headers[:len(exp)], exp)
-        self.assert_('/v1/a%3Fformat%3Djson' in prosrv.logger.msg,
-                     prosrv.logger.msg)
+        got_log_msg = prosrv.logger.log_dict['info'][-1][0][0]
+        self.assert_('/v1/a%3Fformat%3Djson' in got_log_msg,
+                     prosrv.logger.log_dict)
         exp = 'host1'
-        self.assertEquals(prosrv.logger.msg[:len(exp)], exp)
+        self.assertEquals(got_log_msg[:len(exp)], exp)
         # Turn on header logging.
 
-        prosrv.logger = prosrv.access_logger = Logger()
+        prosrv.logger = prosrv.access_logger = FakeLogger()
         prosrv.log_headers = True
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
@@ -2194,8 +2180,9 @@ class TestObjectController(unittest.TestCase):
         headers = readuntil2crlfs(fd)
         exp = 'HTTP/1.1 200'
         self.assertEquals(headers[:len(exp)], exp)
-        self.assert_('Goofy-Header%3A%20True' in prosrv.logger.msg,
-                     prosrv.logger.msg)
+        self.assert_('Goofy-Header%3A%20True' in
+                     prosrv.logger.log_dict['info'][-1][0][0],
+                     prosrv.logger.log_dict)
         prosrv.log_headers = False
         prosrv.logger, prosrv.access_logger = orig_logger, orig_access_logger
 

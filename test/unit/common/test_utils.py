@@ -17,14 +17,17 @@
 
 from __future__ import with_statement
 from test.unit import temptree
+import errno
 import logging
 import mimetools
 import os
-import errno
+import re
 import socket
 import sys
 import time
 import unittest
+from threading import Thread
+from Queue import Queue, Empty
 from getpass import getuser
 from shutil import rmtree
 from StringIO import StringIO
@@ -326,6 +329,8 @@ class TestUtils(unittest.TestCase):
                           'test1\ntest3\ntest4\n')
         # make sure notice lvl logs by default
         logger.notice('test6')
+        self.assertEquals(sio.getvalue(),
+                          'test1\ntest3\ntest4\ntest6\n')
 
     def test_clean_logger_exception(self):
         # setup stream logging
@@ -854,6 +859,183 @@ log_name = %(yarr)s'''
         self.assertTrue(utils.streq_const_time('abc123', 'abc123'))
         self.assertFalse(utils.streq_const_time('a', 'aaaaa'))
         self.assertFalse(utils.streq_const_time('ABC123', 'abc123'))
+
+
+class TestStatsdLogging(unittest.TestCase):
+    def test_get_logger_statsd_client_defaults(self):
+        logger = utils.get_logger({'log_statsd_host': 'some.host.com'},
+                                  'some-name', log_route='some-route')
+        # white-box construction validation
+        self.assert_(isinstance(logger.logger.statsd_client, utils.StatsdClient))
+        self.assertEqual(logger.logger.statsd_client._host, 'some.host.com')
+        self.assertEqual(logger.logger.statsd_client._port, 8125)
+        self.assertEqual(logger.logger.statsd_client._prefix, 'some-name.')
+        self.assertEqual(logger.logger.statsd_default_sample_rate, 1)
+
+    def test_get_logger_statsd_client_non_defaults(self):
+        logger = utils.get_logger({
+            'log_statsd_host': 'another.host.com',
+            'log_statsd_port': 9876,
+            'log_statsd_default_sample_rate': 0.75,
+        }, 'some-name', log_route='some-route')
+        self.assertEqual(logger.logger.statsd_client._prefix, 'some-name.')
+        logger.set_statsd_prefix('some-name.more-specific')
+        self.assertEqual(logger.logger.statsd_client._prefix,
+                         'some-name.more-specific.')
+        logger.set_statsd_prefix('')
+        self.assertEqual(logger.logger.statsd_client._prefix, '')
+        self.assertEqual(logger.logger.statsd_client._host, 'another.host.com')
+        self.assertEqual(logger.logger.statsd_client._port, 9876)
+        self.assertEqual(logger.logger.statsd_default_sample_rate, 0.75)
+
+
+class TestStatsdLoggingDelegation(unittest.TestCase):
+    def setUp(self):
+        self.port = 9177
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('localhost', self.port))
+        self.queue = Queue()
+        self.reader_thread = Thread(target=self.statsd_reader)
+        self.reader_thread.setDaemon(1)
+        self.reader_thread.start()
+
+    def tearDown(self):
+        self.logger.increment('STOP')
+        self.reader_thread.join(timeout=4)
+        self.sock.close()
+        del self.logger
+        time.sleep(0.25)  # avoid occasional "Address already in use"?
+
+    def statsd_reader(self):
+        while True:
+            try:
+                payload = self.sock.recv(4096)
+                if payload and 'STOP' in payload:
+                    return 42
+                self.queue.put(payload)
+            except Exception, e:
+                sys.stderr.write('statsd_reader thread: %r' % (e,))
+                break
+
+    def _send_and_get(self, sender_fn, *args, **kwargs):
+        """
+        Because the client library may not actually send a packet with
+        sample_rate < 1, we keep trying until we get one through.
+        """
+        got = None
+        while not got:
+            sender_fn(*args, **kwargs)
+            try:
+                got = self.queue.get(timeout=1)
+            except Empty:
+                pass
+        return got
+
+    def assertStat(self, expected, sender_fn, *args, **kwargs):
+        got = self._send_and_get(sender_fn, *args, **kwargs)
+        return self.assertEqual(expected, got)
+
+    def assertStatMatches(self, expected_regexp, sender_fn, *args, **kwargs):
+        got = self._send_and_get(sender_fn, *args, **kwargs)
+        return self.assert_(re.search(expected_regexp, got),
+                            [got, expected_regexp])
+
+    def test_delegate_methods_with_no_default_sample_rate(self):
+        self.logger = utils.get_logger({
+            'log_statsd_host': 'localhost',
+            'log_statsd_port': str(self.port),
+        }, 'some-name')
+        self.assertStat('some-name.some.counter:1|c', self.logger.increment,
+                        'some.counter')
+        self.assertStat('some-name.some.counter:-1|c', self.logger.decrement,
+                        'some.counter')
+        self.assertStat('some-name.some.operation:4900.0|ms',
+                        self.logger.timing, 'some.operation', 4.9 * 1000)
+        self.assertStatMatches('some-name\.another\.operation:\d+\.\d+\|ms',
+                               self.logger.timing_since, 'another.operation',
+                               time.time())
+        self.assertStat('some-name.another.counter:42|c',
+                        self.logger.update_stats, 'another.counter', 42)
+
+        # Each call can override the sample_rate (also, bonus prefix test)
+        self.logger.set_statsd_prefix('pfx')
+        self.assertStat('pfx.some.counter:1|c|@0.972', self.logger.increment,
+                        'some.counter', sample_rate=0.972)
+        self.assertStat('pfx.some.counter:-1|c|@0.972', self.logger.decrement,
+                        'some.counter', sample_rate=0.972)
+        self.assertStat('pfx.some.operation:4900.0|ms|@0.972',
+                        self.logger.timing, 'some.operation', 4.9 * 1000,
+                        sample_rate=0.972)
+        self.assertStatMatches('pfx\.another\.op:\d+\.\d+\|ms|@0.972',
+                               self.logger.timing_since, 'another.op',
+                               time.time(), sample_rate=0.972)
+        self.assertStat('pfx.another.counter:3|c|@0.972',
+                        self.logger.update_stats, 'another.counter', 3,
+                        sample_rate=0.972)
+
+        # Can override sample_rate with non-keyword arg
+        self.logger.set_statsd_prefix('')
+        self.assertStat('some.counter:1|c|@0.939', self.logger.increment,
+                        'some.counter', 0.939)
+        self.assertStat('some.counter:-1|c|@0.939', self.logger.decrement,
+                        'some.counter', 0.939)
+        self.assertStat('some.operation:4900.0|ms|@0.939',
+                        self.logger.timing, 'some.operation',
+                        4.9 * 1000, 0.939)
+        self.assertStatMatches('another\.op:\d+\.\d+\|ms|@0.939',
+                               self.logger.timing_since, 'another.op',
+                               time.time(), 0.939)
+        self.assertStat('another.counter:3|c|@0.939',
+                        self.logger.update_stats, 'another.counter', 3, 0.939)
+
+    def test_delegate_methods_with_default_sample_rate(self):
+        self.logger = utils.get_logger({
+            'log_statsd_host': 'localhost',
+            'log_statsd_port': str(self.port),
+            'log_statsd_default_sample_rate': '0.93',
+        }, 'pfx')
+        self.assertStat('pfx.some.counter:1|c|@0.93', self.logger.increment,
+                        'some.counter')
+        self.assertStat('pfx.some.counter:-1|c|@0.93', self.logger.decrement,
+                        'some.counter')
+        self.assertStat('pfx.some.operation:4760.0|ms|@0.93',
+                        self.logger.timing, 'some.operation', 4.76 * 1000)
+        self.assertStatMatches('pfx\.another\.op:\d+\.\d+\|ms|@0.93',
+                               self.logger.timing_since, 'another.op',
+                               time.time())
+        self.assertStat('pfx.another.counter:3|c|@0.93',
+                        self.logger.update_stats, 'another.counter', 3)
+
+        # Each call can override the sample_rate
+        self.assertStat('pfx.some.counter:1|c|@0.9912', self.logger.increment,
+                        'some.counter', sample_rate=0.9912)
+        self.assertStat('pfx.some.counter:-1|c|@0.9912', self.logger.decrement,
+                        'some.counter', sample_rate=0.9912)
+        self.assertStat('pfx.some.operation:4900.0|ms|@0.9912',
+                        self.logger.timing, 'some.operation', 4.9 * 1000,
+                        sample_rate=0.9912)
+        self.assertStatMatches('pfx\.another\.op:\d+\.\d+\|ms|@0.9912',
+                               self.logger.timing_since, 'another.op',
+                               time.time(), sample_rate=0.9912)
+        self.assertStat('pfx.another.counter:3|c|@0.9912',
+                        self.logger.update_stats, 'another.counter', 3,
+                        sample_rate=0.9912)
+
+        # Can override sample_rate with non-keyword arg
+        self.logger.set_statsd_prefix('')
+        self.assertStat('some.counter:1|c|@0.987654', self.logger.increment,
+                        'some.counter', 0.987654)
+        self.assertStat('some.counter:-1|c|@0.987654', self.logger.decrement,
+                        'some.counter', 0.987654)
+        self.assertStat('some.operation:4900.0|ms|@0.987654',
+                        self.logger.timing, 'some.operation',
+                        4.9 * 1000, 0.987654)
+        self.assertStatMatches('another\.op:\d+\.\d+\|ms|@0.987654',
+                               self.logger.timing_since, 'another.op',
+                               time.time(), 0.987654)
+        self.assertStat('another.counter:3|c|@0.987654',
+                        self.logger.update_stats, 'another.counter',
+                        3, 0.987654)
 
 
 if __name__ == '__main__':

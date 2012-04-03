@@ -39,10 +39,6 @@ except ImportError:
 import cPickle as pickle
 import glob
 from urlparse import urlparse as stdlib_urlparse, ParseResult
-try:
-    import pystatsd
-except ImportError:
-    pass
 
 import eventlet
 from eventlet import GreenPool, sleep
@@ -297,6 +293,43 @@ class LoggerFileObject(object):
         return self
 
 
+class StatsdClient(object):
+    def __init__(self, host, port, prefix=''):
+        self._host = host
+        self._port = port
+        self.set_prefix(prefix)
+        self._target = (self._host, self._port)
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def set_prefix(self, new_prefix):
+        if new_prefix:
+            self._prefix = new_prefix + '.'
+        else:
+            self._prefix = ''
+
+    def _send(self, m_name, m_value, m_type, sample_rate):
+        parts = ['%s%s:%s' % (self._prefix, m_name, m_value), m_type]
+        if sample_rate < 1:
+            parts.append('@%s' % (sample_rate,))
+        return self._socket.sendto('|'.join(parts), self._target)
+
+    def update_stats(self, m_name, m_value, sample_rate=1):
+        return self._send(m_name, m_value, 'c', sample_rate)
+
+    def increment(self, metric, sample_rate=1):
+        return self.update_stats(metric, 1, sample_rate)
+
+    def decrement(self, metric, sample_rate=1):
+        return self.update_stats(metric, -1, sample_rate)
+
+    def timing(self, metric, timing_ms, sample_rate=1):
+        return self._send(metric, timing_ms, 'ms', sample_rate)
+
+    def timing_since(self, metric, orig_time, sample_rate=1):
+        return self.timing(metric, (time.time() - orig_time) * 1000,
+                           sample_rate)
+
+
 # double inheritance to support property with setter
 class LogAdapter(logging.LoggerAdapter, object):
     """
@@ -390,42 +423,42 @@ class LogAdapter(logging.LoggerAdapter, object):
         controllers.
         """
         if self.logger.statsd_client:
-            self.logger.statsd_client.prefix = prefix
+            self.logger.statsd_client.set_prefix(prefix)
 
     def statsd_delegate(statsd_func_name):
         """
         Factory which creates methods which delegate to methods on
-        self.logger.statsd_client (an instance of pystatsd.Client).  The
+        self.logger.statsd_client (an instance of StatsdClient).  The
         created methods conditionally delegate to a method whose name is given
         in 'statsd_func_name'.  The created delegate methods are a no-op when
-        either the pystatsd module is not found or StatsD logging is not
-        configured.  The created delegate methods handle the defaulting of
-        sample_rate (to either the default specified in the config with
-        'log_statsd_default_sample_rate' or the value passed into delegate
-        function).
+        StatsD logging is not configured.  The created delegate methods also
+        handle the defaulting of sample_rate (to either the default specified
+        in the config with 'log_statsd_default_sample_rate' or the value passed
+        into delegate function).
 
-        :param statsd_func_name: the name of a method on pystatsd.Client
+        :param statsd_func_name: the name of a method on StatsdClient.
         """
 
-        if 'pystatsd' in sys.modules:
-            func = getattr(pystatsd.Client, statsd_func_name)
-            if func:
-                @functools.wraps(func)
-                def wrapped(self, *a, **kw):
-                    if getattr(self.logger, 'statsd_client'):
-                        if 'sample_rate' not in kw:
-                            kw['sample_rate'] = \
-                                self.logger.statsd_default_sample_rate
-                        return func(self.logger.statsd_client, *a, **kw)
-                return wrapped
-            print "Unable to getattr %r from %r" % (statsd_func_name,
-                                                    pystatsd.Client)
-        return lambda *a, **kw: ''
+        func = getattr(StatsdClient, statsd_func_name)
+        arg_count = func.func_code.co_argcount
 
+        @functools.wraps(func)
+        def wrapped(self, *a, **kw):
+            if getattr(self.logger, 'statsd_client'):
+                # This twisted monkey-business is to allow sample_rate to be
+                # specified by the caller either positionally or by keyword
+                # while still delivering the overriding semantics we want.
+                if 'sample_rate' not in kw and len(a) < arg_count - 1:
+                    kw['sample_rate'] = \
+                        self.logger.statsd_default_sample_rate
+                return func(self.logger.statsd_client, *a, **kw)
+        return wrapped
+
+    update_stats = statsd_delegate('update_stats')
     increment = statsd_delegate('increment')
+    decrement = statsd_delegate('decrement')
     timing = statsd_delegate('timing')
     timing_since = statsd_delegate('timing_since')
-    update_stats = statsd_delegate('update_stats')
 
 
 class SwiftLogFormatter(logging.Formatter):
@@ -510,12 +543,12 @@ def get_logger(conf, name=None, log_to_console=False, log_route=None,
 
     # Setup logger with a StatsD client if so configured
     statsd_host = conf.get('log_statsd_host')
-    if statsd_host and 'pystatsd' in sys.modules:
+    if statsd_host:
         statsd_port = int(conf.get('log_statsd_port', 8125))
-        statsd_client = pystatsd.Client(statsd_host, statsd_port, name)
+        statsd_client = StatsdClient(statsd_host, statsd_port, name)
         logger.statsd_client = statsd_client
-        logger.statsd_default_sample_rate = conf.get(
-            'log_statsd_default_sample_rate', 1)
+        logger.statsd_default_sample_rate = float(conf.get(
+            'log_statsd_default_sample_rate', 1))
     else:
         logger.statsd_client = None
 

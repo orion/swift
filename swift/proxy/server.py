@@ -899,7 +899,7 @@ class ObjectController(Controller):
             for obj in sublisting:
                 yield obj
 
-    def GETorHEAD(self, req):
+    def GETorHEAD(self, req, stats_type):
         """Handle HTTP GET or HEAD requests."""
         start_time = time.time()
         _junk, _junk, req.acl, _junk, _junk, object_versions = \
@@ -1147,7 +1147,7 @@ class ObjectController(Controller):
                 return aresp
         if not containers:
             self.app.logger.timing_since(
-                '%.timing' % (stats_type,), start_time)
+                '%s.timing' % (stats_type,), start_time)
             return HTTPNotFound(request=req)
         if 'x-delete-after' in req.headers:
             try:
@@ -1761,7 +1761,7 @@ class AccountController(Controller):
         Controller.__init__(self, app)
         self.account_name = unquote(account_name)
 
-    def GETorHEAD(self, req, stats_type=None):
+    def GETorHEAD(self, req, stats_type):
         """Handler for HTTP GET/HEAD requests."""
         start_time = time.time()
         partition, nodes = self.app.account_ring.get_nodes(self.account_name)
