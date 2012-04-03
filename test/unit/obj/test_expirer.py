@@ -300,7 +300,6 @@ class TestObjectExpirer(TestCase):
 
         x = expirer.ObjectExpirer({})
         x.logger = FakeLogger()
-
         cts = int(time() - 86400)
         ots = int(time() - 86400)
 
