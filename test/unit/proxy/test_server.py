@@ -38,7 +38,7 @@ import simplejson
 from webob import Request, Response
 from webob.exc import HTTPNotFound, HTTPUnauthorized
 
-from test.unit import connect_tcp, readuntil2crlfs
+from test.unit import connect_tcp, readuntil2crlfs, FakeLogger
 from swift.proxy import server as proxy_server
 from swift.account import server as account_server
 from swift.container import server as container_server
@@ -71,7 +71,8 @@ def setup():
     _orig_container_listing_limit = proxy_server.CONTAINER_LISTING_LIMIT
     conf = {'devices': _testdir, 'swift_dir': _testdir,
             'mount_check': 'false', 'allowed_headers':
-            'content-encoding, x-object-manifest, content-disposition, foo'}
+            'content-encoding, x-object-manifest, content-disposition, foo',
+            'allow_versions': 'True'}
     prolis = listen(('localhost', 0))
     acc1lis = listen(('localhost', 0))
     acc2lis = listen(('localhost', 0))
@@ -169,6 +170,10 @@ def fake_http_connect(*code_iter, **kwargs):
             return self
 
         def getexpect(self):
+            if self.status == -2:
+                raise HTTPException()
+            if self.status == -3:
+                return FakeConn(507)
             return FakeConn(100)
 
         def getheaders(self):
@@ -232,7 +237,7 @@ def fake_http_connect(*code_iter, **kwargs):
         status = code_iter.next()
         etag = etag_iter.next()
         timestamp = timestamps_iter.next()
-        if status == -1:
+        if status <= 0:
             raise HTTPException()
         return FakeConn(status, etag, body=kwargs.get('body', ''),
                         timestamp=timestamp)
@@ -304,12 +309,6 @@ class FakeMemcacheReturnsNone(FakeMemcache):
         # Returns None as the timestamp of the container; assumes we're only
         # using the FakeMemcache for container existence checks.
         return None
-
-
-class NullLoggingHandler(logging.Handler):
-
-    def emit(self, record):
-        pass
 
 
 @contextmanager
@@ -626,23 +625,19 @@ class TestProxyServer(unittest.TestCase):
             proxy_server.get_logger = mock_get_logger
             test_conf({})
             line = snarf.strip_value()
-            print line
             self.assert_(line.startswith('swift'))
             self.assert_(line.endswith('INFO'))
             test_conf({'log_name': 'snarf-test'})
             line = snarf.strip_value()
-            print line
             self.assert_(line.startswith('snarf-test'))
             self.assert_(line.endswith('INFO'))
             test_conf({'log_name': 'snarf-test', 'log_level': 'ERROR'})
             line = snarf.strip_value()
-            print line
             self.assertFalse(line)
             test_conf({'log_name': 'snarf-test', 'log_level': 'ERROR',
                        'access_log_name': 'access-test',
                        'access_log_level': 'INFO'})
             line = snarf.strip_value()
-            print line
             self.assert_(line.startswith('access-test'))
             self.assert_(line.endswith('INFO'))
 
@@ -727,7 +722,7 @@ class TestProxyServer(unittest.TestCase):
         swift_dir = mkdtemp()
         try:
             baseapp = proxy_server.BaseApplication({'swift_dir': swift_dir},
-                FakeMemcache(), NullLoggingHandler(), FakeRing(), FakeRing(),
+                FakeMemcache(), FakeLogger(), FakeRing(), FakeRing(),
                 FakeRing())
             resp = baseapp.handle_request(
                 Request.blank('/', environ={'CONTENT_LENGTH': '-1'}))
@@ -800,7 +795,7 @@ class TestObjectController(unittest.TestCase):
             with open(os.path.join(swift_dir, 'mime.types'), 'w') as fp:
                 fp.write('foo/bar foo\n')
             ba = proxy_server.BaseApplication({'swift_dir': swift_dir},
-                FakeMemcache(), NullLoggingHandler(), FakeRing(), FakeRing(),
+                FakeMemcache(), FakeLogger(), FakeRing(), FakeRing(),
                 FakeRing())
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.foo')[0],
                               'foo/bar')
@@ -830,46 +825,12 @@ class TestObjectController(unittest.TestCase):
 
     def test_PUT_connect_exceptions(self):
 
-        def mock_http_connect(*code_iter, **kwargs):
-
-            class FakeConn(object):
-
-                def __init__(self, status):
-                    self.status = status
-                    self.reason = 'Fake'
-
-                def getresponse(self):
-                    return self
-
-                def read(self, amt=None):
-                    return ''
-
-                def getheader(self, name):
-                    return ''
-
-                def getexpect(self):
-                    if self.status == -2:
-                        raise HTTPException()
-                    if self.status == -3:
-                        return FakeConn(507)
-                    return FakeConn(100)
-
-            code_iter = iter(code_iter)
-
-            def connect(*args, **ckwargs):
-                status = code_iter.next()
-                if status == -1:
-                    raise HTTPException()
-                return FakeConn(status)
-
-            return connect
-
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'account',
                 'container', 'object')
 
             def test_status_map(statuses, expected):
-                proxy_server.http_connect = mock_http_connect(*statuses)
+                proxy_server.http_connect = fake_http_connect(*statuses)
                 self.app.memcache.store = {}
                 req = Request.blank('/a/c/o.jpg', {})
                 req.content_length = 0
@@ -885,50 +846,13 @@ class TestObjectController(unittest.TestCase):
 
     def test_PUT_send_exceptions(self):
 
-        def mock_http_connect(*code_iter, **kwargs):
-
-            class FakeConn(object):
-
-                def __init__(self, status):
-                    self.status = status
-                    self.reason = 'Fake'
-                    self.host = '1.2.3.4'
-                    self.port = 1024
-                    self.etag = md5()
-
-                def getresponse(self):
-                    self.etag = self.etag.hexdigest()
-                    self.headers = {
-                        'etag': self.etag,
-                    }
-                    return self
-
-                def read(self, amt=None):
-                    return ''
-
-                def send(self, amt=None):
-                    if self.status == -1:
-                        raise HTTPException()
-                    else:
-                        self.etag.update(amt)
-
-                def getheader(self, name):
-                    return self.headers.get(name, '')
-
-                def getexpect(self):
-                    return FakeConn(100)
-            code_iter = iter(code_iter)
-
-            def connect(*args, **ckwargs):
-                return FakeConn(code_iter.next())
-            return connect
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'account',
                 'container', 'object')
 
             def test_status_map(statuses, expected):
                 self.app.memcache.store = {}
-                proxy_server.http_connect = mock_http_connect(*statuses)
+                proxy_server.http_connect = fake_http_connect(*statuses)
                 req = Request.blank('/a/c/o.jpg',
                     environ={'REQUEST_METHOD': 'PUT'}, body='some data')
                 self.app.update_request(req)
@@ -953,44 +877,13 @@ class TestObjectController(unittest.TestCase):
 
     def test_PUT_getresponse_exceptions(self):
 
-        def mock_http_connect(*code_iter, **kwargs):
-
-            class FakeConn(object):
-
-                def __init__(self, status):
-                    self.status = status
-                    self.reason = 'Fake'
-                    self.host = '1.2.3.4'
-                    self.port = 1024
-
-                def getresponse(self):
-                    if self.status == -1:
-                        raise HTTPException()
-                    return self
-
-                def read(self, amt=None):
-                    return ''
-
-                def send(self, amt=None):
-                    pass
-
-                def getheader(self, name):
-                    return ''
-
-                def getexpect(self):
-                    return FakeConn(100)
-            code_iter = iter(code_iter)
-
-            def connect(*args, **ckwargs):
-                return FakeConn(code_iter.next())
-            return connect
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'account',
                 'container', 'object')
 
             def test_status_map(statuses, expected):
                 self.app.memcache.store = {}
-                proxy_server.http_connect = mock_http_connect(*statuses)
+                proxy_server.http_connect = fake_http_connect(*statuses)
                 req = Request.blank('/a/c/o.jpg', {})
                 req.content_length = 0
                 self.app.update_request(req)
@@ -1086,12 +979,12 @@ class TestObjectController(unittest.TestCase):
                     self.assert_('accept-ranges' in res.headers)
                     self.assertEquals(res.headers['accept-ranges'], 'bytes')
 
-            test_status_map((200, 404, 404), 200)
-            test_status_map((200, 500, 404), 200)
-            test_status_map((304, 500, 404), 304)
-            test_status_map((404, 404, 404), 404)
-            test_status_map((404, 404, 500), 404)
-            test_status_map((500, 500, 500), 503)
+            test_status_map((200, 200, 200, 404, 404), 200)
+            test_status_map((200, 200, 200, 500, 404), 200)
+            test_status_map((200, 200, 304, 500, 404), 304)
+            test_status_map((200, 200, 404, 404, 404), 404)
+            test_status_map((200, 200, 404, 404, 500), 404)
+            test_status_map((200, 200, 500, 500, 500), 503)
 
     def test_HEAD_newest(self):
         with save_globals():
@@ -1111,12 +1004,13 @@ class TestObjectController(unittest.TestCase):
                 self.assertEquals(res.headers.get('last-modified'),
                                   expected_timestamp)
 
-            test_status_map((200, 200, 200), 200, ('1', '2', '3'), '3')
-            test_status_map((200, 200, 200), 200, ('1', '3', '2'), '3')
-            test_status_map((200, 200, 200), 200, ('1', '3', '1'), '3')
-            test_status_map((200, 200, 200), 200, ('3', '3', '1'), '3')
-            test_status_map((200, 200, 200), 200, (None, None, None), None)
-            test_status_map((200, 200, 200), 200, (None, None, '1'), '1')
+            #                acct cont obj  obj  obj
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '2', '3'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '3', '2'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '3', '1'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '3', '3', '1'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', None, None, None), None)
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', None, None, '1'), '1')
 
     def test_GET_newest(self):
         with save_globals():
@@ -1136,12 +1030,12 @@ class TestObjectController(unittest.TestCase):
                 self.assertEquals(res.headers.get('last-modified'),
                                   expected_timestamp)
 
-            test_status_map((200, 200, 200), 200, ('1', '2', '3'), '3')
-            test_status_map((200, 200, 200), 200, ('1', '3', '2'), '3')
-            test_status_map((200, 200, 200), 200, ('1', '3', '1'), '3')
-            test_status_map((200, 200, 200), 200, ('3', '3', '1'), '3')
-            test_status_map((200, 200, 200), 200, (None, None, None), None)
-            test_status_map((200, 200, 200), 200, (None, None, '1'), '1')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '2', '3'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '3', '2'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '3', '1'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '3', '3', '1'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', None, None, None), None)
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', None, None, '1'), '1')
 
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'account',
@@ -1160,11 +1054,11 @@ class TestObjectController(unittest.TestCase):
                 self.assertEquals(res.headers.get('last-modified'),
                                   expected_timestamp)
 
-            test_status_map((200, 200, 200), 200, ('1', '2', '3'), '1')
-            test_status_map((200, 200, 200), 200, ('1', '3', '2'), '1')
-            test_status_map((200, 200, 200), 200, ('1', '3', '1'), '1')
-            test_status_map((200, 200, 200), 200, ('3', '3', '1'), '3')
-            test_status_map((200, 200, 200), 200, (None, '1', '2'), None)
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '2', '3'), '1')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '3', '2'), '1')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '1', '3', '1'), '1')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', '3', '3', '1'), '3')
+            test_status_map((200, 200, 200, 200, 200), 200, ('0', '0', None, '1', '2'), None)
 
     def test_POST_meta_val_len(self):
         with save_globals():
@@ -1516,25 +1410,25 @@ class TestObjectController(unittest.TestCase):
             proxy_server.shuffle = lambda l: None
             controller = proxy_server.ObjectController(self.app, 'account',
                                                        'container', 'object')
-            self.assert_status_map(controller.HEAD, (503, 200, 200), 200)
+            self.assert_status_map(controller.HEAD, (200, 200, 503, 200, 200), 200)
             self.assertEquals(controller.app.object_ring.devs[0]['errors'], 2)
             self.assert_('last_error' in controller.app.object_ring.devs[0])
             for _junk in xrange(self.app.error_suppression_limit):
-                self.assert_status_map(controller.HEAD, (503, 503, 503), 503)
+                self.assert_status_map(controller.HEAD, (200, 200, 503, 503, 503), 503)
             self.assertEquals(controller.app.object_ring.devs[0]['errors'],
                               self.app.error_suppression_limit + 1)
-            self.assert_status_map(controller.HEAD, (200, 200, 200), 503)
+            self.assert_status_map(controller.HEAD, (200, 200, 200, 200, 200), 503)
             self.assert_('last_error' in controller.app.object_ring.devs[0])
-            self.assert_status_map(controller.PUT, (200, 201, 201, 201), 503)
+            self.assert_status_map(controller.PUT, (200, 200, 200, 201, 201, 201), 503)
             self.assert_status_map(controller.POST,
-                                   (200, 200, 200, 200, 202, 202, 202), 503)
+                                   (200, 200, 200, 200, 200, 200, 202, 202, 202), 503)
             self.assert_status_map(controller.DELETE,
-                                   (200, 204, 204, 204), 503)
+                                   (200, 200, 200, 204, 204, 204), 503)
             self.app.error_suppression_interval = -300
-            self.assert_status_map(controller.HEAD, (200, 200, 200), 200)
+            self.assert_status_map(controller.HEAD, (200, 200, 200, 200, 200), 200)
             self.assertRaises(BaseException,
                 self.assert_status_map, controller.DELETE,
-                (200, 204, 204, 204), 503, raise_exc=True)
+                (200, 200, 200, 204, 204, 204), 503, raise_exc=True)
 
     def test_acc_or_con_missing_returns_404(self):
         with save_globals():
@@ -2229,13 +2123,8 @@ class TestObjectController(unittest.TestCase):
         (prolis, acc1lis, acc2lis, con2lis, con2lis, obj1lis, obj2lis) = \
                  _test_sockets
 
-        class Logger(object):
-
-            def info(self, msg):
-                self.msg = msg
-
         orig_logger, orig_access_logger = prosrv.logger, prosrv.access_logger
-        prosrv.logger = prosrv.access_logger = Logger()
+        prosrv.logger = prosrv.access_logger = FakeLogger()
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
         fd.write(
@@ -2248,7 +2137,8 @@ class TestObjectController(unittest.TestCase):
         exp = 'HTTP/1.1 200'
         self.assertEquals(headers[:len(exp)], exp)
         exp = '127.0.0.1 127.0.0.1'
-        self.assert_(exp in prosrv.logger.msg)
+        self.assertEquals(prosrv.logger.log_dict['exception'], [])
+        self.assert_(exp in prosrv.logger.log_dict['info'][-1][0][0])
 
     def test_chunked_put_logging(self):
         # GET account with a query string to test that
@@ -2259,13 +2149,8 @@ class TestObjectController(unittest.TestCase):
         (prolis, acc1lis, acc2lis, con2lis, con2lis, obj1lis, obj2lis) = \
                  _test_sockets
 
-        class Logger(object):
-
-            def info(self, msg):
-                self.msg = msg
-
         orig_logger, orig_access_logger = prosrv.logger, prosrv.access_logger
-        prosrv.logger = prosrv.access_logger = Logger()
+        prosrv.logger = prosrv.access_logger = FakeLogger()
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
         fd.write(
@@ -2277,13 +2162,14 @@ class TestObjectController(unittest.TestCase):
         headers = readuntil2crlfs(fd)
         exp = 'HTTP/1.1 200'
         self.assertEquals(headers[:len(exp)], exp)
-        self.assert_('/v1/a%3Fformat%3Djson' in prosrv.logger.msg,
-                     prosrv.logger.msg)
+        got_log_msg = prosrv.logger.log_dict['info'][-1][0][0]
+        self.assert_('/v1/a%3Fformat%3Djson' in got_log_msg,
+                     prosrv.logger.log_dict)
         exp = 'host1'
-        self.assertEquals(prosrv.logger.msg[:len(exp)], exp)
+        self.assertEquals(got_log_msg[:len(exp)], exp)
         # Turn on header logging.
 
-        prosrv.logger = prosrv.access_logger = Logger()
+        prosrv.logger = prosrv.access_logger = FakeLogger()
         prosrv.log_headers = True
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
         fd = sock.makefile()
@@ -2294,8 +2180,9 @@ class TestObjectController(unittest.TestCase):
         headers = readuntil2crlfs(fd)
         exp = 'HTTP/1.1 200'
         self.assertEquals(headers[:len(exp)], exp)
-        self.assert_('Goofy-Header%3A%20True' in prosrv.logger.msg,
-                     prosrv.logger.msg)
+        self.assert_('Goofy-Header%3A%20True' in
+                     prosrv.logger.log_dict['info'][-1][0][0],
+                     prosrv.logger.log_dict)
         prosrv.log_headers = False
         prosrv.logger, prosrv.access_logger = orig_logger, orig_access_logger
 
@@ -2448,6 +2335,279 @@ class TestObjectController(unittest.TestCase):
         self.assertEquals(headers[:len(exp)], exp)
         body = fd.read()
         self.assertEquals(body, 'oh hai123456789abcdef')
+
+    def test_version_manifest(self):
+        versions_to_create = 3
+        # Create a container for our versioned object testing
+        (prolis, acc1lis, acc2lis, con2lis, con2lis, obj1lis, obj2lis) = \
+                 _test_sockets
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/versions HTTP/1.1\r\nHost: localhost\r\n'
+                 'Connection: close\r\nX-Storage-Token: t\r\n'
+                 'Content-Length: 0\r\nX-Versions-Location: vers\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        # check that the header was set
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/versions HTTP/1.1\r\nHost: localhost\r\n'
+                 'Connection: close\r\nX-Storage-Token: t\r\n\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'  # 2xx series response
+        self.assertEquals(headers[:len(exp)], exp)
+        self.assert_('X-Versions-Location: vers' in headers)
+        # make the container for the object versions
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/vers HTTP/1.1\r\nHost: localhost\r\n'
+                 'Connection: close\r\nX-Storage-Token: t\r\n'
+                 'Content-Length: 0\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        # Create the versioned file
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 5\r\nContent-Type: text/jibberish0\r\n'
+            'X-Object-Meta-Foo: barbaz\r\n\r\n00000\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        # Create the object versions
+        for segment in xrange(1, versions_to_create):
+            sleep(.01)  # guarantee that the timestamp changes
+            sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+            fd = sock.makefile()
+            fd.write('PUT /v1/a/versions/name HTTP/1.1\r\nHost: '
+                'localhost\r\nConnection: close\r\nX-Storage-Token: '
+                't\r\nContent-Length: 5\r\nContent-Type: text/jibberish%s'
+                '\r\n\r\n%05d\r\n' % (segment, segment))
+            fd.flush()
+            headers = readuntil2crlfs(fd)
+            exp = 'HTTP/1.1 201'
+            self.assertEquals(headers[:len(exp)], exp)
+            # Ensure retrieving the manifest file gets the latest version
+            sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+            fd = sock.makefile()
+            fd.write('GET /v1/a/versions/name HTTP/1.1\r\nHost: '
+                'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+            fd.flush()
+            headers = readuntil2crlfs(fd)
+            exp = 'HTTP/1.1 200'
+            self.assertEquals(headers[:len(exp)], exp)
+            self.assert_('Content-Type: text/jibberish%s' % segment in headers)
+            self.assert_('X-Object-Meta-Foo: barbaz' not in headers)
+            body = fd.read()
+            self.assertEquals(body, '%05d' % segment)
+        # Ensure we have the right number of versions saved
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/vers?prefix=004name/ HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 200'
+        self.assertEquals(headers[:len(exp)], exp)
+        body = fd.read()
+        versions = [x for x in body.split('\n') if x]
+        self.assertEquals(len(versions), versions_to_create - 1)
+        # copy a version and make sure the version info is stripped
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('COPY /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: '
+            't\r\nDestination: versions/copied_name\r\n'
+            'Content-Length: 0\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'  # 2xx series response to the COPY
+        self.assertEquals(headers[:len(exp)], exp)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/versions/copied_name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 200'
+        self.assertEquals(headers[:len(exp)], exp)
+        body = fd.read()
+        self.assertEquals(body, '%05d' % segment)
+        # post and make sure it's updated
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('POST /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: '
+            't\r\nContent-Type: foo/bar\r\nContent-Length: 0\r\n'
+            'X-Object-Meta-Bar: foo\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'  # 2xx series response to the POST
+        self.assertEquals(headers[:len(exp)], exp)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 200'
+        self.assertEquals(headers[:len(exp)], exp)
+        self.assert_('Content-Type: foo/bar' in headers)
+        self.assert_('X-Object-Meta-Bar: foo' in headers)
+        body = fd.read()
+        self.assertEquals(body, '%05d' % segment)
+        # Delete the object versions
+        for segment in xrange(versions_to_create - 1, 0, -1):
+            sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+            fd = sock.makefile()
+            fd.write('DELETE /v1/a/versions/name HTTP/1.1\r\nHost: '
+                'localhost\r\nConnection: close\r\nX-Storage-Token: t\r\n\r\n')
+            fd.flush()
+            headers = readuntil2crlfs(fd)
+            exp = 'HTTP/1.1 2'  # 2xx series response
+            self.assertEquals(headers[:len(exp)], exp)
+            # Ensure retrieving the manifest file gets the latest version
+            sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+            fd = sock.makefile()
+            fd.write('GET /v1/a/versions/name HTTP/1.1\r\nHost: '
+                'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+            fd.flush()
+            headers = readuntil2crlfs(fd)
+            exp = 'HTTP/1.1 200'
+            self.assertEquals(headers[:len(exp)], exp)
+            self.assert_('Content-Type: text/jibberish%s' % (segment - 1)
+                        in headers)
+            body = fd.read()
+            self.assertEquals(body, '%05d' % (segment - 1))
+            # Ensure we have the right number of versions saved
+            sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+            fd = sock.makefile()
+            fd.write('GET /v1/a/vers?prefix=004name/ HTTP/1.1\r\nHost: '
+                'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+            fd.flush()
+            headers = readuntil2crlfs(fd)
+            exp = 'HTTP/1.1 2'  # 2xx series response
+            self.assertEquals(headers[:len(exp)], exp)
+            body = fd.read()
+            versions = [x for x in body.split('\n') if x]
+            self.assertEquals(len(versions), segment - 1)
+        # there is now one segment left (in the manifest)
+        # Ensure we have no saved versions
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/vers?prefix=004name/ HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 204 No Content'
+        self.assertEquals(headers[:len(exp)], exp)
+        # delete the last verision
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('DELETE /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'  # 2xx series response
+        self.assertEquals(headers[:len(exp)], exp)
+        # Ensure it's all gone
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 404'
+        self.assertEquals(headers[:len(exp)], exp)
+
+        # make sure manifest files don't get versioned
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 0\r\nContent-Type: text/jibberish0\r\n'
+            'Foo: barbaz\r\nX-Object-Manifest: vers/foo_\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        # Ensure we have no saved versions
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/vers?prefix=004name/ HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 204 No Content'
+        self.assertEquals(headers[:len(exp)], exp)
+
+        # DELETE v1/a/c/obj shouldn't delete v1/a/c/obj/sub versions
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 5\r\nContent-Type: text/jibberish0\r\n'
+            'Foo: barbaz\r\n\r\n00000\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 5\r\nContent-Type: text/jibberish0\r\n'
+            'Foo: barbaz\r\n\r\n00001\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/versions/name/sub HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 4\r\nContent-Type: text/jibberish0\r\n'
+            'Foo: barbaz\r\n\r\nsub1\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/versions/name/sub HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 4\r\nContent-Type: text/jibberish0\r\n'
+            'Foo: barbaz\r\n\r\nsub2\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('DELETE /v1/a/versions/name HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'  # 2xx series response
+        self.assertEquals(headers[:len(exp)], exp)
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('GET /v1/a/vers?prefix=008name/sub/ HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Auth-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'  # 2xx series response
+        self.assertEquals(headers[:len(exp)], exp)
+        body = fd.read()
+        versions = [x for x in body.split('\n') if x]
+        self.assertEquals(len(versions), 1)
 
     def test_chunked_put_lobjects(self):
         # Create a container for our segmented/manifest object testing
@@ -2619,7 +2779,6 @@ class TestObjectController(unittest.TestCase):
         headers = readuntil2crlfs(fd)
         exp = 'HTTP/1.1 200'
         self.assertEquals(headers[:len(exp)], exp)
-        print headers
         self.assert_('Content-Type: text/jibberish' in headers)
         # Check set content type
         sock = connect_tcp(('localhost', prolis.getsockname()[1]))
@@ -2731,7 +2890,7 @@ class TestObjectController(unittest.TestCase):
     def test_response_bytes_transferred_attr(self):
         with save_globals():
             proxy_server.http_connect = \
-                fake_http_connect(200, body='1234567890')
+                fake_http_connect(200, 200, 200, body='1234567890')
             controller = proxy_server.ObjectController(self.app, 'account',
                             'container', 'object')
             req = Request.blank('/a/c/o')
@@ -2759,7 +2918,7 @@ class TestObjectController(unittest.TestCase):
     def test_response_client_disconnect_attr(self):
         with save_globals():
             proxy_server.http_connect = \
-                fake_http_connect(200, body='1234567890')
+                fake_http_connect(200, 200, 200, body='1234567890')
             controller = proxy_server.ObjectController(self.app, 'account',
                             'container', 'object')
             req = Request.blank('/a/c/o')

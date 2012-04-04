@@ -39,9 +39,8 @@ class ObjectUpdater(Daemon):
         self.devices = conf.get('devices', '/srv/node')
         self.mount_check = conf.get('mount_check', 'true').lower() in \
                               ('true', 't', '1', 'on', 'yes', 'y')
-        swift_dir = conf.get('swift_dir', '/etc/swift')
+        self.swift_dir = conf.get('swift_dir', '/etc/swift')
         self.interval = int(conf.get('interval', 300))
-        self.container_ring_path = os.path.join(swift_dir, 'container.ring.gz')
         self.container_ring = None
         self.concurrency = int(conf.get('concurrency', 1))
         self.slowdown = float(conf.get('slowdown', 0.01))
@@ -53,9 +52,7 @@ class ObjectUpdater(Daemon):
     def get_container_ring(self):
         """Get the container ring.  Load it, if it hasn't been yet."""
         if not self.container_ring:
-            self.logger.debug(
-                _('Loading container ring from %s'), self.container_ring_path)
-            self.container_ring = Ring(self.container_ring_path)
+            self.container_ring = Ring(self.swift_dir, ring_name='container')
         return self.container_ring
 
     def run_forever(self, *args, **kwargs):
@@ -70,6 +67,7 @@ class ObjectUpdater(Daemon):
             for device in os.listdir(self.devices):
                 if self.mount_check and not \
                         os.path.ismount(os.path.join(self.devices, device)):
+                    self.logger.increment('errors')
                     self.logger.warn(
                         _('Skipping %s as it is not mounted'), device)
                     continue
@@ -109,6 +107,7 @@ class ObjectUpdater(Daemon):
         for device in os.listdir(self.devices):
             if self.mount_check and \
                     not os.path.ismount(os.path.join(self.devices, device)):
+                self.logger.increment('errors')
                 self.logger.warn(
                     _('Skipping %s as it is not mounted'), device)
                 continue
@@ -125,6 +124,7 @@ class ObjectUpdater(Daemon):
 
         :param device: path to device
         """
+        start_time = time.time()
         async_pending = os.path.join(device, ASYNCDIR)
         if not os.path.isdir(async_pending):
             return
@@ -140,6 +140,7 @@ class ObjectUpdater(Daemon):
                 try:
                     obj_hash, timestamp = update.split('-')
                 except ValueError:
+                    self.logger.increment('errors')
                     self.logger.error(
                         _('ERROR async pending file with unexpected name %s')
                         % (update_path))
@@ -154,6 +155,7 @@ class ObjectUpdater(Daemon):
                 os.rmdir(prefix_path)
             except OSError:
                 pass
+        self.logger.timing_since('timing', start_time)
 
     def process_object_update(self, update_path, device):
         """
@@ -167,6 +169,7 @@ class ObjectUpdater(Daemon):
         except Exception:
             self.logger.exception(
                 _('ERROR Pickle problem, quarantining %s'), update_path)
+            self.logger.increment('quarantines')
             renamer(update_path, os.path.join(device,
                 'quarantined', 'objects', os.path.basename(update_path)))
             return
@@ -176,6 +179,7 @@ class ObjectUpdater(Daemon):
         obj = '/%s/%s/%s' % \
               (update['account'], update['container'], update['obj'])
         success = True
+        new_successes = False
         for node in nodes:
             if node['id'] not in successes:
                 status = self.object_update(node, part, update['op'], obj,
@@ -184,17 +188,21 @@ class ObjectUpdater(Daemon):
                     success = False
                 else:
                     successes.append(node['id'])
+                    new_successes = True
         if success:
             self.successes += 1
+            self.logger.increment('successes')
             self.logger.debug(_('Update sent for %(obj)s %(path)s'),
                 {'obj': obj, 'path': update_path})
             os.unlink(update_path)
         else:
             self.failures += 1
+            self.logger.increment('failures')
             self.logger.debug(_('Update failed for %(obj)s %(path)s'),
                 {'obj': obj, 'path': update_path})
-            update['successes'] = successes
-            write_pickle(update, update_path, os.path.join(device, 'tmp'))
+            if new_successes:
+                update['successes'] = successes
+                write_pickle(update, update_path, os.path.join(device, 'tmp'))
 
     def object_update(self, node, part, op, obj, headers):
         """

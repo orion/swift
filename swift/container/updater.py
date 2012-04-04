@@ -23,12 +23,13 @@ from tempfile import mkstemp
 
 from eventlet import spawn, patcher, Timeout
 
+import swift.common.db
 from swift.container.server import DATADIR
 from swift.common.bufferedhttp import http_connect
 from swift.common.db import ContainerBroker
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.ring import Ring
-from swift.common.utils import get_logger, whataremyips
+from swift.common.utils import get_logger, whataremyips, TRUE_VALUES
 from swift.common.daemon import Daemon
 
 
@@ -41,9 +42,8 @@ class ContainerUpdater(Daemon):
         self.devices = conf.get('devices', '/srv/node')
         self.mount_check = conf.get('mount_check', 'true').lower() in \
                               ('true', 't', '1', 'on', 'yes', 'y')
-        swift_dir = conf.get('swift_dir', '/etc/swift')
+        self.swift_dir = conf.get('swift_dir', '/etc/swift')
         self.interval = int(conf.get('interval', 300))
-        self.account_ring_path = os.path.join(swift_dir, 'account.ring.gz')
         self.account_ring = None
         self.concurrency = int(conf.get('concurrency', 4))
         self.slowdown = float(conf.get('slowdown', 0.01))
@@ -56,13 +56,13 @@ class ContainerUpdater(Daemon):
         self.account_suppression_time = \
             float(conf.get('account_suppression_time', 60))
         self.new_account_suppressions = None
+        swift.common.db.DB_PREALLOCATION = \
+            conf.get('db_preallocation', 't').lower() in TRUE_VALUES
 
     def get_account_ring(self):
         """Get the account ring.  Load it if it hasn't been yet."""
         if not self.account_ring:
-            self.logger.debug(
-                _('Loading account ring from %s'), self.account_ring_path)
-            self.account_ring = Ring(self.account_ring_path)
+            self.account_ring = Ring(self.swift_dir, ring_name='account')
         return self.account_ring
 
     def get_paths(self):
@@ -193,6 +193,7 @@ class ContainerUpdater(Daemon):
 
         :param dbfile: container DB to process
         """
+        start_time = time.time()
         broker = ContainerBroker(dbfile, logger=self.logger)
         info = broker.get_info()
         # Don't send updates if the container was auto-created since it
@@ -219,6 +220,7 @@ class ContainerUpdater(Daemon):
                 else:
                     failures += 1
             if successes > failures:
+                self.logger.increment('successes')
                 self.successes += 1
                 self.logger.debug(
                     _('Update report sent for %(container)s %(dbfile)s'),
@@ -227,6 +229,7 @@ class ContainerUpdater(Daemon):
                                 info['delete_timestamp'], info['object_count'],
                                 info['bytes_used'])
             else:
+                self.logger.increment('failures')
                 self.failures += 1
                 self.logger.debug(
                     _('Update report failed for %(container)s %(dbfile)s'),
@@ -236,7 +239,10 @@ class ContainerUpdater(Daemon):
                 if self.new_account_suppressions:
                     print >>self.new_account_suppressions, \
                         info['account'], until
+            # Only track timing data for attempted updates:
+            self.logger.timing_since('timing', start_time)
         else:
+            self.logger.increment('no_changes')
             self.no_changes += 1
 
     def container_report(self, node, part, container, put_timestamp,

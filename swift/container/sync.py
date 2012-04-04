@@ -20,6 +20,7 @@ from struct import unpack_from
 
 from eventlet import sleep, Timeout
 
+import swift.common.db
 from swift.container import server as container_server
 from swift.common.client import ClientException, delete_object, put_object, \
     quote
@@ -172,13 +173,14 @@ class ContainerSync(Daemon):
         self.reported = time()
         swift_dir = conf.get('swift_dir', '/etc/swift')
         #: swift.common.ring.Ring for locating containers.
-        self.container_ring = container_ring or \
-            Ring(os.path.join(swift_dir, 'container.ring.gz'))
+        self.container_ring = container_ring or Ring(swift_dir,
+                ring_name='container')
         #: swift.common.ring.Ring for locating objects.
-        self.object_ring = object_ring or \
-            Ring(os.path.join(swift_dir, 'object.ring.gz'))
+        self.object_ring = object_ring or Ring(swift_dir, ring_name='object')
         self._myips = whataremyips()
         self._myport = int(conf.get('bind_port', 6001))
+        swift.common.db.DB_PREALLOCATION = \
+            conf.get('db_preallocation', 't').lower() in TRUE_VALUES
 
     def run_forever(self):
         """
@@ -271,6 +273,7 @@ class ContainerSync(Daemon):
                         sync_key = value
                 if not sync_to or not sync_key:
                     self.container_skips += 1
+                    self.logger.increment('skips')
                     return
                 sync_to = sync_to.rstrip('/')
                 err = validate_sync_to(sync_to, self.allowed_sync_hosts)
@@ -280,6 +283,7 @@ class ContainerSync(Daemon):
                         {'db_file': broker.db_file,
                          'validate_sync_to_err': err})
                     self.container_failures += 1
+                    self.logger.increment('failures')
                     return
                 stop_at = time() + self.container_time
                 while time() < stop_at and sync_point2 < sync_point1:
@@ -322,8 +326,10 @@ class ContainerSync(Daemon):
                     sync_point1 = row['ROWID']
                     broker.set_x_container_sync_points(sync_point1, None)
                 self.container_syncs += 1
+                self.logger.increment('syncs')
         except (Exception, Timeout), err:
             self.container_failures += 1
+            self.logger.increment('failures')
             self.logger.exception(_('ERROR Syncing %s'), (broker.db_file))
 
     def container_sync_row(self, row, sync_to, sync_key, broker, info):
@@ -341,6 +347,7 @@ class ContainerSync(Daemon):
         :returns: True on success
         """
         try:
+            start_time = time()
             if row['deleted']:
                 try:
                     delete_object(sync_to, name=row['name'],
@@ -351,6 +358,8 @@ class ContainerSync(Daemon):
                     if err.http_status != 404:
                         raise
                 self.container_deletes += 1
+                self.logger.increment('deletes')
+                self.logger.timing_since('deletes.timing', start_time)
             else:
                 part, nodes = self.object_ring.get_nodes(
                     info['account'], info['container'],
@@ -396,6 +405,8 @@ class ContainerSync(Daemon):
                 put_object(sync_to, name=row['name'], headers=headers,
                     contents=_Iter2FileLikeObject(body), proxy=self.proxy)
                 self.container_puts += 1
+                self.logger.increment('puts')
+                self.logger.timing_since('puts.timing', start_time)
         except ClientException, err:
             if err.http_status == 401:
                 self.logger.info(_('Unauth %(sync_from)r '
@@ -414,11 +425,13 @@ class ContainerSync(Daemon):
                     _('ERROR Syncing %(db_file)s %(row)s'),
                     {'db_file': broker.db_file, 'row': row})
             self.container_failures += 1
+            self.logger.increment('failures')
             return False
         except (Exception, Timeout), err:
             self.logger.exception(
                 _('ERROR Syncing %(db_file)s %(row)s'),
                 {'db_file': broker.db_file, 'row': row})
             self.container_failures += 1
+            self.logger.increment('failures')
             return False
         return True

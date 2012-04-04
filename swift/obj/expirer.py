@@ -95,14 +95,18 @@ class ObjectExpirer(Daemon):
                     timestamp = int(timestamp)
                     if timestamp > int(time()):
                         break
+                    start_time = time()
                     try:
                         self.delete_actual_object(actual_obj, timestamp)
                         self.delete_object(container, obj)
                         self.report_objects += 1
+                        self.logger.increment('objects')
                     except (Exception, Timeout), err:
+                        self.logger.increment('errors')
                         self.logger.exception(
                             _('Exception while deleting object %s %s %s') %
                             (container, obj, str(err)))
+                    self.logger.timing_since('timing', start_time)
                     self.report()
                 try:
                     self.delete_container(container)
@@ -197,7 +201,7 @@ class ObjectExpirer(Daemon):
                (quote(self.expiring_objects_account), quote(container))
         marker = ''
         while True:
-            resp = self.get_response('GET', path + '&' + quote(marker),
+            resp = self.get_response('GET', path + '&marker=' + quote(marker),
                                      {}, (2, 404))
             if resp.status_int in (204, 404):
                 break
