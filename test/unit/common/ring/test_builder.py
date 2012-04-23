@@ -559,6 +559,66 @@ class TestRingBuilder(unittest.TestCase):
         rb.rebalance()
         self.assertNotEquals(rb.validate(stats=True)[1], 999.99)
 
+    def test_multitier_validate(self):
+        rb = ring.RingBuilder(8, 8, 1)
+
+        rb.add_dev({'id': 0, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 10000, 'device': 'sda1'})
+        rb.add_dev({'id': 1, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 10000, 'device': 'sda1'})
+        rb.add_dev({'id': 2, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 44444, 'device': 'sda1'})
+        rb.add_dev({'id': 3, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 44444, 'device': 'sda1'})
+
+        rb.add_dev({'id': 4, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 10000, 'device': 'sda1'})
+        rb.add_dev({'id': 5, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 10000, 'device': 'sda1'})
+        rb.add_dev({'id': 6, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 44444, 'device': 'sda1'})
+        rb.add_dev({'id': 7, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 44444, 'device': 'sda1'})
+
+        rb.rebalance()
+        rb.validate()
+
+        # Test overweight zone
+        for replica in xrange(rb.replicas):
+            dev = rb.devs[rb._replica2part2dev[replica][0]]
+            if dev['zone'] != 0:
+                orig_dev_id = rb._replica2part2dev[replica][0]
+                rb._replica2part2dev[replica][0] = 0
+
+                self.assertRaises(exceptions.RingValidationError, rb.validate)
+
+                rb._replica2part2dev[replica][0] = orig_dev_id
+                break
+
+        # Test overweight (ip, port) tuple
+        for replica in xrange(rb.replicas):
+            dev = rb.devs[rb._replica2part2dev[replica][0]]
+            if dev['zone'] == 0 and dev['port'] != 10000:
+                orig_dev_id = rb._replica2part2dev[replica][0]
+                rb._replica2part2dev[replica][0] = 0
+
+                self.assertRaises(exceptions.RingValidationError, rb.validate)
+
+                rb._replica2part2dev[replica][0] = orig_dev_id
+                break
+
+        # Test overweight device
+        for replica in xrange(rb.replicas):
+            dev = rb.devs[rb._replica2part2dev[replica][0]]
+            if dev['zone'] == 0 and dev['port'] == 10000 and dev['id'] != 0:
+                orig_dev_id = dev['id']
+                rb._replica2part2dev[replica][0] = 0
+
+                self.assertRaises(exceptions.RingValidationError, rb.validate)
+
+                rb._replica2part2dev[replica][0] = orig_dev_id
+                break
+
 
 if __name__ == '__main__':
     unittest.main()
