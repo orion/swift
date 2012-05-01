@@ -68,11 +68,13 @@ def get_socket(conf, default_port=8080):
             if addr[0] in (socket.AF_INET, socket.AF_INET6)][0]
     sock = None
     retry_until = time.time() + 30
+    warn_ssl = False
     while not sock and time.time() < retry_until:
         try:
             sock = listen(bind_addr, backlog=int(conf.get('backlog', 4096)),
                         family=address_family)
             if 'cert_file' in conf:
+                warn_ssl = True
                 sock = ssl.wrap_socket(sock, certfile=conf['cert_file'],
                     keyfile=conf['key_file'])
         except socket.error, err:
@@ -86,6 +88,12 @@ def get_socket(conf, default_port=8080):
     # in my experience, sockets can hang around forever without keepalive
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 600)
+    if warn_ssl:
+        ssl_warning_message = 'WARNING: SSL should only be enabled for ' \
+                              'testing purposes. Use external SSL ' \
+                              'termination for a production deployment.'
+        get_logger(conf).warning(ssl_warning_message)
+        print _(ssl_warning_message)
     return sock
 
 
@@ -298,15 +306,17 @@ def make_pre_authed_env(env, method=None, path=None, agent='Swift'):
     """
     newenv = {}
     for name in ('eventlet.posthooks', 'HTTP_USER_AGENT',
-                 'PATH_INFO', 'REMOTE_USER', 'REQUEST_METHOD',
-                 'SCRIPT_NAME', 'SERVER_NAME', 'SERVER_PORT',
-                 'SERVER_PROTOCOL', 'swift.cache', 'swift.source',
-                 'swift.trans_id'):
+                 'PATH_INFO', 'QUERY_STRING', 'REMOTE_USER', 'REQUEST_METHOD',
+                 'SERVER_NAME', 'SERVER_PORT', 'SERVER_PROTOCOL',
+                 'swift.cache', 'swift.source', 'swift.trans_id'):
         if name in env:
             newenv[name] = env[name]
     if method:
         newenv['REQUEST_METHOD'] = method
     if path:
+        if '?' in path:
+            path, query_string = path.split('?', 1)
+            newenv['QUERY_STRING'] = query_string
         newenv['PATH_INFO'] = path
     if agent:
         newenv['HTTP_USER_AGENT'] = (

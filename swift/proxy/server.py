@@ -48,7 +48,7 @@ from eventlet.timeout import Timeout
 from webob.exc import HTTPAccepted, HTTPBadRequest, HTTPForbidden, \
     HTTPMethodNotAllowed, HTTPNotFound, HTTPPreconditionFailed, \
     HTTPRequestEntityTooLarge, HTTPRequestTimeout, HTTPServerError, \
-    HTTPServiceUnavailable, HTTPUnprocessableEntity, status_map
+    HTTPServiceUnavailable, status_map
 from webob import Request, Response
 
 from swift.common.ring import Ring
@@ -76,8 +76,7 @@ def update_headers(response, headers):
         if name == 'etag':
             response.headers[name] = value.replace('"', '')
         elif name not in ('date', 'content-length', 'content-type',
-                          'connection', 'x-timestamp', 'x-put-timestamp',
-                          'x-delete-after'):
+                          'connection', 'x-put-timestamp', 'x-delete-after'):
             response.headers[name] = value
 
 
@@ -182,7 +181,7 @@ class SegmentedIterable(object):
             resp = self.controller.GETorHEAD_base(req, _('Object'), partition,
                 self.controller.iter_nodes(partition, nodes,
                 self.controller.app.object_ring), path,
-                self.controller.app.object_ring.replica_count)
+                len(nodes))
             if resp.status_int // 100 != 2:
                 raise Exception(_('Could not load object segment %(path)s:' \
                     ' %(status)s') % {'path': path, 'status': resp.status_int})
@@ -410,7 +409,7 @@ class Controller(object):
                 return None, None, None
         result_code = 0
         container_count = 0
-        attempts_left = self.app.account_ring.replica_count
+        attempts_left = len(nodes)
         path = '/%s' % account
         headers = {'x-trans-id': self.trans_id, 'Connection': 'close'}
         for node in self.iter_nodes(partition, nodes, self.app.account_ring):
@@ -503,7 +502,7 @@ class Controller(object):
         sync_key = None
         container_size = None
         versions = None
-        attempts_left = self.app.container_ring.replica_count
+        attempts_left = len(nodes)
         headers = {'x-trans-id': self.trans_id, 'Connection': 'close'}
         for node in self.iter_nodes(partition, nodes, self.app.container_ring):
             try:
@@ -601,13 +600,14 @@ class Controller(object):
                         backend request that should be made.
         :returns: a webob Response object
         """
-        nodes = self.iter_nodes(part, ring.get_part_nodes(part), ring)
-        pile = GreenPile(ring.replica_count)
+        start_nodes = ring.get_part_nodes(part)
+        nodes = self.iter_nodes(part, start_nodes, ring)
+        pile = GreenPile(len(start_nodes))
         for head in headers:
             pile.spawn(self._make_request, nodes, part, method, path,
                     head, query_string)
         response = [resp for resp in pile if resp]
-        while len(response) < ring.replica_count:
+        while len(response) < len(start_nodes):
             response.append((503, '', ''))
         statuses, reasons, bodies = zip(*response)
         return self.best_response(req, statuses, reasons, bodies,
@@ -880,7 +880,7 @@ class ObjectController(Controller):
             shuffle(lnodes)
             lresp = self.GETorHEAD_base(lreq, _('Container'),
                 lpartition, lnodes, lreq.path_info,
-                self.app.container_ring.replica_count)
+                len(lnodes))
             if 'swift.authorize' in env:
                 lreq.acl = lresp.headers.get('x-container-read')
                 aresp = env['swift.authorize'](lreq)
@@ -914,7 +914,7 @@ class ObjectController(Controller):
         shuffle(nodes)
         resp = self.GETorHEAD_base(req, _('Object'), partition,
                 self.iter_nodes(partition, nodes, self.app.object_ring),
-                req.path_info, self.app.object_ring.replica_count)
+                req.path_info, len(nodes))
 
         # If we get a 416 Requested Range Not Satisfiable we have to check if
         # we were actually requesting a manifest and then redo
@@ -924,7 +924,7 @@ class ObjectController(Controller):
             req.range = None
             resp2 = self.GETorHEAD_base(req, _('Object'), partition,
                     self.iter_nodes(partition, nodes, self.app.object_ring),
-                    req.path_info, self.app.object_ring.replica_count)
+                    req.path_info, len(nodes))
             if 'x-object-manifest' not in resp2.headers:
                 self.app.logger.timing_since(
                     '%s.timing' % (stats_type,), start_time)
@@ -1185,7 +1185,7 @@ class ObjectController(Controller):
             hreq = Request.blank(req.path_info, headers={'X-Newest': 'True'},
                                  environ={'REQUEST_METHOD': 'HEAD'})
             hresp = self.GETorHEAD_base(hreq, _('Object'), partition, nodes,
-                hreq.path_info, self.app.object_ring.replica_count)
+                hreq.path_info, len(nodes))
         # Used by container sync feature
         if 'x-timestamp' in req.headers:
             try:
@@ -1448,21 +1448,20 @@ class ObjectController(Controller):
             lcontainer = object_versions.split('/')[0]
             prefix_len = '%03x' % len(self.object_name)
             lprefix = prefix_len + self.object_name + '/'
+            last_item = None
             try:
-                raw_listing = self._listing_iter(lcontainer, lprefix,
-                                                 req.environ)
+                for last_item in self._listing_iter(lcontainer, lprefix,
+                                                    req.environ):
+                    pass
             except ListingIterNotFound:
-                # set raw_listing so that the actual object is deleted
-                raw_listing = []
+                # no worries, last_item is None
+                pass
             except ListingIterNotAuthorized, err:
                 self.app.logger.increment('auth_short_circuits')
                 return err.aresp
             except ListingIterError:
                 self.app.logger.increment('errors')
                 return HTTPServerError(request=req)
-            last_item = None
-            for item in raw_listing:  # find the last item
-                last_item = item
             if last_item:
                 # there are older versions so copy the previous version to the
                 # current object and delete the previous version
@@ -1601,7 +1600,7 @@ class ContainerController(Controller):
                         self.account_name, self.container_name)
         shuffle(nodes)
         resp = self.GETorHEAD_base(req, _('Container'), part, nodes,
-                req.path_info, self.app.container_ring.replica_count)
+                req.path_info, len(nodes))
 
         if self.app.memcache:
             # set the memcache container size for ratelimiting
@@ -1767,7 +1766,7 @@ class AccountController(Controller):
         partition, nodes = self.app.account_ring.get_nodes(self.account_name)
         shuffle(nodes)
         resp = self.GETorHEAD_base(req, _('Account'), partition, nodes,
-                req.path_info.rstrip('/'), self.app.account_ring.replica_count)
+                req.path_info.rstrip('/'), len(nodes))
         if resp.status_int == 404 and self.app.account_autocreate:
             if len(self.account_name) > MAX_ACCOUNT_NAME_LENGTH:
                 resp = HTTPBadRequest(request=req)
@@ -1787,7 +1786,7 @@ class AccountController(Controller):
                 raise Exception('Could not autocreate account %r' %
                                 self.account_name)
             resp = self.GETorHEAD_base(req, _('Account'), partition, nodes,
-                req.path_info.rstrip('/'), self.app.account_ring.replica_count)
+                req.path_info.rstrip('/'), len(nodes))
         self.app.logger.timing_since('%s.timing' % (stats_type,), start_time)
         return resp
 
@@ -1939,6 +1938,8 @@ class BaseApplication(object):
         self.max_containers_whitelist = [a.strip()
             for a in conf.get('max_containers_whitelist', '').split(',')
             if a.strip()]
+        self.deny_host_headers = [host.strip() for host in
+            conf.get('deny_host_headers', '').split(',') if host.strip()]
 
     def get_controller(self, path):
         """
@@ -2028,6 +2029,9 @@ class BaseApplication(object):
             if not controller:
                 self.logger.increment('errors')
                 return HTTPPreconditionFailed(request=req, body='Bad URL')
+            if self.deny_host_headers and \
+                    req.host.split(':')[0] in self.deny_host_headers:
+                return HTTPForbidden(request=req, body='Invalid host header')
 
             self.logger.set_statsd_prefix('proxy-server.' +
                                           controller.server_type)

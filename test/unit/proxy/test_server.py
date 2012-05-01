@@ -228,8 +228,8 @@ def fake_http_connect(*code_iter, **kwargs):
 
     def connect(*args, **ckwargs):
         if 'give_content_type' in kwargs:
-            if len(args) >= 7 and 'content_type' in args[6]:
-                kwargs['give_content_type'](args[6]['content-type'])
+            if len(args) >= 7 and 'Content-Type' in args[6]:
+                kwargs['give_content_type'](args[6]['Content-Type'])
             else:
                 kwargs['give_content_type']('')
         if 'give_connect' in kwargs:
@@ -252,7 +252,6 @@ class FakeRing(object):
         # this is set higher.
         self.max_more_nodes = 0
         self.devs = {}
-        self.replica_count = 3
 
     def get_nodes(self, account, container=None, obj=None):
         devs = []
@@ -735,6 +734,19 @@ class TestProxyServer(unittest.TestCase):
         finally:
             rmtree(swift_dir, ignore_errors=True)
 
+    def test_denied_host_header(self):
+        swift_dir = mkdtemp()
+        try:
+            baseapp = proxy_server.BaseApplication({'swift_dir': swift_dir,
+                'deny_host_headers': 'invalid_host.com'},
+                FakeMemcache(), NullLoggingHandler(), FakeRing(), FakeRing(),
+                FakeRing())
+            resp = baseapp.handle_request(
+                Request.blank('/v1/a/c/o',
+                              environ={'HTTP_HOST': 'invalid_host.com'}))
+            self.assertEquals(resp.status, '403 Forbidden')
+        finally:
+            rmtree(swift_dir, ignore_errors=True)
 
 class TestObjectController(unittest.TestCase):
 
@@ -776,17 +788,26 @@ class TestObjectController(unittest.TestCase):
                 'container', 'object')
 
             def test_content_type(filename, expected):
-                proxy_server.http_connect = fake_http_connect(201, 201, 201,
+                # The three responses here are for account_info() (HEAD to account server),
+                # container_info() (HEAD to container server) and three calls to
+                # _connect_put_node() (PUT to three object servers)
+                proxy_server.http_connect = fake_http_connect(201, 201, 201, 201, 201,
                     give_content_type=lambda content_type:
                         self.assertEquals(content_type, expected.next()))
-                req = Request.blank('/a/c/%s' % filename, {})
+                # We need into include a transfer-encoding to get past
+                # constraints.check_object_creation()
+                req = Request.blank('/a/c/%s' % filename, {}, headers={'transfer-encoding': 'chunked'})
                 self.app.update_request(req)
+                self.app.memcache.store = {}
                 res = controller.PUT(req)
-            test_content_type('test.jpg', iter(['', '', '', 'image/jpeg',
+                # If we don't check the response here we could miss problems in PUT()
+                self.assertEquals(res.status_int, 201)
+
+            test_content_type('test.jpg', iter(['', '', 'image/jpeg',
                                                 'image/jpeg', 'image/jpeg']))
-            test_content_type('test.html', iter(['', '', '', 'text/html',
+            test_content_type('test.html', iter(['', '', 'text/html',
                                                  'text/html', 'text/html']))
-            test_content_type('test.css', iter(['', '', '', 'text/css',
+            test_content_type('test.css', iter(['', '', 'text/css',
                                                 'text/css', 'text/css']))
 
     def test_custom_mime_types_files(self):
@@ -824,7 +845,6 @@ class TestObjectController(unittest.TestCase):
             test_status_map((200, 200, 204, 500, 404), 503)
 
     def test_PUT_connect_exceptions(self):
-
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'account',
                 'container', 'object')
@@ -845,7 +865,6 @@ class TestObjectController(unittest.TestCase):
             test_status_map((200, 200, 503, 503, -1), 503)
 
     def test_PUT_send_exceptions(self):
-
         with save_globals():
             controller = proxy_server.ObjectController(self.app, 'account',
                 'container', 'object')
@@ -2608,6 +2627,46 @@ class TestObjectController(unittest.TestCase):
         body = fd.read()
         versions = [x for x in body.split('\n') if x]
         self.assertEquals(len(versions), 1)
+
+        # Check for when the versions target container doesn't exist
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/whoops HTTP/1.1\r\nHost: localhost\r\n'
+                 'Connection: close\r\nX-Storage-Token: t\r\n'
+                 'Content-Length: 0\r\nX-Versions-Location: none\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        # Create the versioned file
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/whoops/foo HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 5\r\n\r\n00000\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 201'
+        self.assertEquals(headers[:len(exp)], exp)
+        # Create another version
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('PUT /v1/a/whoops/foo HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: '
+            't\r\nContent-Length: 5\r\n\r\n00001\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 412'
+        self.assertEquals(headers[:len(exp)], exp)
+        # Delete the object
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+        fd.write('DELETE /v1/a/whoops/foo HTTP/1.1\r\nHost: '
+            'localhost\r\nConnection: close\r\nX-Storage-Token: t\r\n\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'  # 2xx response
+        self.assertEquals(headers[:len(exp)], exp)
 
     def test_chunked_put_lobjects(self):
         # Create a container for our segmented/manifest object testing

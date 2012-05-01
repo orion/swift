@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from time import ctime, time
 from random import random, shuffle
 from struct import unpack_from
@@ -28,7 +27,7 @@ from swift.common.direct_client import direct_get_object
 from swift.common.ring import Ring
 from swift.common.db import ContainerBroker
 from swift.common.utils import audit_location_generator, get_logger, \
-    hash_path, normalize_timestamp, TRUE_VALUES, validate_sync_to, whataremyips
+    hash_path, TRUE_VALUES, validate_sync_to, whataremyips
 from swift.common.daemon import Daemon
 
 
@@ -300,7 +299,7 @@ class ContainerSync(Daemon):
                     # will attempt to sync previously skipped rows in case the
                     # other nodes didn't succeed.
                     if unpack_from('>I', key)[0] % \
-                            self.container_ring.replica_count != ordinal:
+                            len(nodes) != ordinal:
                         if not self.container_sync_row(row, sync_to, sync_key,
                                                        broker, info):
                             return
@@ -319,7 +318,7 @@ class ContainerSync(Daemon):
                     # previously skipped rows in case the other nodes didn't
                     # succeed.
                     if unpack_from('>I', key)[0] % \
-                            self.container_ring.replica_count == ordinal:
+                            len(nodes) == ordinal:
                         if not self.container_sync_row(row, sync_to, sync_key,
                                                        broker, info):
                             return

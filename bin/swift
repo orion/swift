@@ -176,17 +176,6 @@ def json_request(method, url, **kwargs):
     return resp, body
 
 
-def get_conn(options):
-    """
-    Return a connection building it from the options.
-    """
-    return Connection(options.auth,
-                      options.user,
-                      options.key,
-                      snet=options.snet,
-                      auth_version=options.auth_version)
-
-
 def _get_auth_v1_0(url, user, key, snet):
     parsed, conn = http_connection(url)
     conn.request('GET', parsed.path, '',
@@ -209,15 +198,14 @@ def _get_auth_v1_0(url, user, key, snet):
                                                 resp.getheader('x-auth-token'))
 
 
-def _get_auth_v2_0(url, user, key, snet):
-    if ':' in user:
-        tenant, user = user.split(':')
-    else:
-        tenant = user
-
-    body = {"auth": {"tenantName": tenant,
-                     "passwordCredentials":
-                         {"username": user, "password": key}}}
+def _get_auth_v2_0(url, user, tenant_name, key, snet):
+    if not tenant_name and ':' in user:
+        tenant_name, user = user.split(':', 1)
+    if not tenant_name:
+        raise ClientException('No tenant specified')
+    body = {'auth': {'passwordCredentials':
+                      {'password': key, 'username': user},
+                     'tenantName': tenant_name}}
     token_url = urljoin(url, "tokens")
     resp, body = json_request("POST", token_url, body=body)
     token_id = None
@@ -243,7 +231,7 @@ def _get_auth_v2_0(url, user, key, snet):
     return url, token_id
 
 
-def get_auth(url, user, key, snet=False, auth_version="1.0"):
+def get_auth(url, user, key, snet=False, tenant_name=None, auth_version="1.0"):
     """
     Get authentication/authorization credentials.
 
@@ -257,14 +245,16 @@ def get_auth(url, user, key, snet=False, auth_version="1.0"):
     :param user: user to authenticate as
     :param key: key or password for authorization
     :param snet: use SERVICENET internal network (see above), default is False
-    :param auth_version: OpenStack authentication version (default is 1.0)
+    :param auth_version: OpenStack auth version, default is 1.0
+    :param tenant_name: The tenant/account name, required when connecting
+                        to a auth 2.0 system.
     :returns: tuple of (storage URL, auth token)
     :raises: ClientException: HTTP GET request to auth URL failed
     """
     if auth_version in ["1.0", "1"]:
         return _get_auth_v1_0(url, user, key, snet)
     elif auth_version in ["2.0", "2"]:
-        return _get_auth_v2_0(url, user, key, snet)
+        return _get_auth_v2_0(url, user, tenant_name, key, snet)
 
 
 def get_account(url, token, marker=None, limit=None, prefix=None,
@@ -818,9 +808,10 @@ class Connection(object):
 
     def __init__(self, authurl, user, key, retries=5, preauthurl=None,
                  preauthtoken=None, snet=False, starting_backoff=1,
+                 tenant_name=None,
                  auth_version="1"):
         """
-        :param authurl: authenitcation URL
+        :param authurl: authentication URL
         :param user: user name to authenticate as
         :param key: key/password to authenticate with
         :param retries: Number of times to retry the request before failing
@@ -828,7 +819,9 @@ class Connection(object):
         :param preauthtoken: authentication token (if you have already
                              authenticated)
         :param snet: use SERVICENET internal network default is False
-        :param auth_version: Openstack auth version.
+        :param auth_version: OpenStack auth version, default is 1.0
+        :param tenant_name: The tenant/account name, required when connecting
+                            to a auth 2.0 system.
         """
         self.authurl = authurl
         self.user = user
@@ -841,9 +834,12 @@ class Connection(object):
         self.snet = snet
         self.starting_backoff = starting_backoff
         self.auth_version = auth_version
+        self.tenant_name = tenant_name
 
     def get_auth(self):
-        return get_auth(self.authurl, self.user, self.key, snet=self.snet,
+        return get_auth(self.authurl, self.user,
+                        self.key, snet=self.snet,
+                        tenant_name=self.tenant_name,
                         auth_version=self.auth_version)
 
     def http_connection(self):
@@ -969,6 +965,18 @@ class Connection(object):
 
 # End inclusion of swift.common.client
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+
+
+def get_conn(options):
+    """
+    Return a connection building it from the options.
+    """
+    return Connection(options.auth,
+                      options.user,
+                      options.key,
+                      snet=options.snet,
+                      tenant_name=options.os_tenant_name,
+                      auth_version=options.auth_version)
 
 
 def mkdirs(path):
@@ -1202,7 +1210,7 @@ download --all OR download container [options] [object] [object] ...
     stdout.'''.strip('\n')
 
 
-def st_download(options, args, print_queue, error_queue):
+def st_download(parser, args, print_queue, error_queue):
     parser.add_option('-a', '--all', action='store_true', dest='yes_all',
         default=False, help='Indicates that you really want to download '
         'everything in the account')
@@ -1378,7 +1386,7 @@ list [options] [container]
 '''.strip('\n')
 
 
-def st_list(options, args, print_queue, error_queue):
+def st_list(parser, args, print_queue, error_queue):
     parser.add_option('-p', '--prefix', dest='prefix', help='Will only list '
         'items beginning with the prefix')
     parser.add_option('-d', '--delimiter', dest='delimiter', help='Will roll '
@@ -1423,7 +1431,7 @@ stat [container] [object]
     args given (if any).'''.strip('\n')
 
 
-def st_stat(options, args, print_queue, error_queue):
+def st_stat(parser, args, print_queue, error_queue):
     (options, args) = parse_args(parser, args)
     args = args[1:]
     conn = get_conn(options)
@@ -1548,7 +1556,7 @@ post [options] [container] [object]
     post -m Color:Blue -m Size:Large'''.strip('\n')
 
 
-def st_post(options, args, print_queue, error_queue):
+def st_post(parser, args, print_queue, error_queue):
     parser.add_option('-r', '--read-acl', dest='read_acl', help='Sets the '
         'Read ACL for containers. Quick summary of ACL syntax: .r:*, '
         '.r:-.example.com, .r:www.example.com, account1, account2:user2')
@@ -1619,7 +1627,7 @@ upload [options] container file_or_directory [file_or_directory] [...]
 '''.strip('\n')
 
 
-def st_upload(options, args, print_queue, error_queue):
+def st_upload(parser, args, print_queue, error_queue):
     parser.add_option('-c', '--changed', action='store_true', dest='changed',
         default=False, help='Will only upload files that have changed since '
         'the last upload')
@@ -1865,7 +1873,7 @@ def parse_args(parser, args, enforce_requires=True):
     (options, args) = parser.parse_args(args)
 
     if (not (options.auth and options.user and options.key) or
-            environ.get('OS_AUTH_URL')):
+        options.os_auth_url):
         # Use 2.0 auth if none of the old args are present
         options.auth_version = "2.0"
 
@@ -1930,6 +1938,9 @@ Example:
                       help=SUPPRESS_HELP)
     parser.add_option('--os_username', dest='os_username',
                       default=environ.get('OS_USERNAME'),
+                      help=SUPPRESS_HELP)
+    parser.add_option('--os_tenant_name', dest='os_tenant_name',
+                      default=environ.get('OS_TENANT_NAME'),
                       help=SUPPRESS_HELP)
     parser.add_option('--os_password', dest='os_password',
                       default=environ.get('OS_PASSWORD'),
