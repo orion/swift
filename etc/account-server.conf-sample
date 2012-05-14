@@ -39,10 +39,6 @@ use = egg:swift#account
 # log_name = account-replicator
 # log_facility = LOG_LOCAL0
 # log_level = INFO
-# You can override the default statsD logging config for this app here:
-# log_statsd_host = localhost
-# log_statsd_port = 8125
-# log_statsd_default_sample_rate = 1
 # vm_test_mode = no
 # per_diff = 1000
 # max_diffs = 100
@@ -65,10 +61,6 @@ use = egg:swift#account
 # log_name = account-auditor
 # log_facility = LOG_LOCAL0
 # log_level = INFO
-# You can override the default statsD logging config for this app here:
-# log_statsd_host = localhost
-# log_statsd_port = 8125
-# log_statsd_default_sample_rate = 1
 # Will audit, at most, 1 account per device per interval
 # interval = 1800
 
@@ -77,10 +69,6 @@ use = egg:swift#account
 # log_name = account-reaper
 # log_facility = LOG_LOCAL0
 # log_level = INFO
-# You can override the default statsD logging config for this app here:
-# log_statsd_host = localhost
-# log_statsd_port = 8125
-# log_statsd_default_sample_rate = 1
 # concurrency = 25
 # interval = 3600
 # node_timeout = 10
