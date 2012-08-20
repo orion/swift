@@ -101,7 +101,8 @@ class ProxyLoggingMiddleware(object):
             if value:
                 access_log_conf[key] = value
         self.access_logger = get_logger(access_log_conf,
-                        log_route='proxy-access')
+                                        log_route='proxy-access')
+        self.access_logger.set_statsd_prefix('proxy-server')
 
     def log_request(self, env, status_int, bytes_received, bytes_sent,
                     request_time, client_disconnect):
@@ -124,8 +125,9 @@ class ProxyLoggingMiddleware(object):
         logged_headers = None
         if self.log_hdrs:
             logged_headers = '\n'.join('%s: %s' % (k, v)
-                for k, v in req.headers.items())
-        self.access_logger.info(' '.join(quote(str(x) if x else '-')
+                                       for k, v in req.headers.items())
+        self.access_logger.info(' '.join(
+            quote(str(x) if x else '-')
             for x in (
                 get_remote_client(req),
                 req.remote_addr,
@@ -145,7 +147,23 @@ class ProxyLoggingMiddleware(object):
                 '%.4f' % request_time,
                 req.environ.get('swift.source'),
             )))
-        self.access_logger.txn_id = None
+        # Log timing and bytes-transfered data to StatsD
+        if req.path.startswith('/v1/'):
+            try:
+                stat_type = [None, None, 'Account', 'Container',
+                             'Object'][req.path.count('/')]
+            except IndexError:
+                stat_type = 'Object'
+        else:
+            stat_type = env.get('swift.source')
+        # Only log data for valid controllers (or SOS) to keep the metric count
+        # down (egregious errors will get logged by the proxy server itself).
+        if stat_type:
+            metric_name = '.'.join((stat_type, req.method, str(status_int)))
+            self.access_logger.timing(metric_name + '.timing',
+                                      request_time * 1000)
+            self.access_logger.update_stats(metric_name + '.xfer',
+                                            bytes_received + bytes_sent)
 
     def __call__(self, env, start_response):
         start_response_args = [None]
@@ -175,8 +193,8 @@ class ProxyLoggingMiddleware(object):
                         ('content-length', str(sum(len(i) for i in iterable))))
                 else:
                     raise Exception('WSGI [proxy-logging]: No content-length '
-                        'or transfer-encoding header sent and there is '
-                        'content! %r' % chunk)
+                                    'or transfer-encoding header sent and '
+                                    'there is content! %r' % chunk)
             start_response(*start_response_args[0])
             bytes_sent = 0
             client_disconnect = False
@@ -190,16 +208,17 @@ class ProxyLoggingMiddleware(object):
                 raise
             finally:
                 status_int = int(start_response_args[0][0].split(' ', 1)[0])
-                self.log_request(env, status_int,
-                        input_proxy.bytes_received, bytes_sent,
-                        time.time() - start_time,
-                        client_disconnect or input_proxy.client_disconnect)
+                self.log_request(
+                    env, status_int, input_proxy.bytes_received, bytes_sent,
+                    time.time() - start_time,
+                    client_disconnect or input_proxy.client_disconnect)
 
         try:
             iterable = self.app(env, my_start_response)
         except Exception:
-            self.log_request(env, 500, input_proxy.bytes_received, 0,
-                    time.time() - start_time, input_proxy.client_disconnect)
+            self.log_request(
+                env, 500, input_proxy.bytes_received, 0,
+                time.time() - start_time, input_proxy.client_disconnect)
             raise
         else:
             return iter_response(iterable)
