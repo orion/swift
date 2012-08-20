@@ -600,7 +600,7 @@ class TestProxyServer(unittest.TestCase):
         self.assertEquals(resp.status_int, 500)
 
     def test_internal_method_request(self):
-        baseapp = proxy_server.BaseApplication({},
+        baseapp = proxy_server.Application({},
             FakeMemcache(), container_ring=FakeRing(), object_ring=FakeRing(),
             account_ring=FakeRing())
         resp = baseapp.handle_request(
@@ -608,7 +608,7 @@ class TestProxyServer(unittest.TestCase):
         self.assertEquals(resp.status, '405 Method Not Allowed')
 
     def test_inexistent_method_request(self):
-        baseapp = proxy_server.BaseApplication({},
+        baseapp = proxy_server.Application({},
             FakeMemcache(), container_ring=FakeRing(), account_ring=FakeRing(),
             object_ring=FakeRing())
         resp = baseapp.handle_request(
@@ -649,7 +649,7 @@ class TestProxyServer(unittest.TestCase):
     def test_negative_content_length(self):
         swift_dir = mkdtemp()
         try:
-            baseapp = proxy_server.BaseApplication({'swift_dir': swift_dir},
+            baseapp = proxy_server.Application({'swift_dir': swift_dir},
                 FakeMemcache(), FakeLogger(), FakeRing(), FakeRing(),
                 FakeRing())
             resp = baseapp.handle_request(
@@ -666,7 +666,7 @@ class TestProxyServer(unittest.TestCase):
     def test_denied_host_header(self):
         swift_dir = mkdtemp()
         try:
-            baseapp = proxy_server.BaseApplication({'swift_dir': swift_dir,
+            baseapp = proxy_server.Application({'swift_dir': swift_dir,
                 'deny_host_headers': 'invalid_host.com'},
                 FakeMemcache(), FakeLogger(), FakeRing(), FakeRing(),
                 FakeRing())
@@ -741,7 +741,7 @@ class TestObjectController(unittest.TestCase):
         try:
             with open(os.path.join(swift_dir, 'mime.types'), 'w') as fp:
                 fp.write('foo/bar foo\n')
-            ba = proxy_server.BaseApplication({'swift_dir': swift_dir},
+            ba = proxy_server.Application({'swift_dir': swift_dir},
                 FakeMemcache(), FakeLogger(), FakeRing(), FakeRing(),
                 FakeRing())
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.foo')[0],
