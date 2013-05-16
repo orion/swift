@@ -722,6 +722,30 @@ log_name = %(yarr)s'''
         os.unlink('/tmp/test')
         self.assertRaises(SystemExit, utils.readconf, '/tmp/test')
 
+    def test_readconf_create_pipeline(self):
+        conf = '''
+[section1]
+order = 200
+
+[section2]
+order = 100
+
+[section3]
+order = 150 
+'''
+        # setup a real file
+        with open('/tmp/test', 'wb') as f:
+            f.write(conf)
+        make_filename = lambda: '/tmp/test'
+        # setup a file stream
+        make_fp = lambda: StringIO(conf)
+        conffile = make_filename()
+        result = utils.readconf(conffile)
+        pipeline = {'pipeline': 
+                    'section2 section1 section3'}
+        self.assertEquals(result['pipeline:main'], pipeline)
+        os.unlink('/tmp/test')
+
     def test_readconf_dir(self):
         config_dir = {
             'server.conf.d/01.conf': """

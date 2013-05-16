@@ -1266,7 +1266,14 @@ def readconf(conf_path, section_name=None, log_name=None, defaults=None,
         if 'log_name' not in conf:
             conf['log_name'] = log_name
     conf['__file__'] = conf_path
+
+    if not 'pipeline:main' in c.sections():
+        build_conf_pipeline(conf)
+
     return conf
+
+def build_conf_pipeline(conf):
+    pass
 
 
 def write_pickle(obj, dest, tmp=None, pickle_protocol=0):
